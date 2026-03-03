@@ -59,6 +59,45 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
+  // KB Routes
+  app.get("/api/kb", async (req: Request, res: Response) => {
+    try {
+      const kbs = await chatStorage.getAllKB();
+      res.json(kbs);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch KB" });
+    }
+  });
+
+  app.post("/api/kb", async (req: Request, res: Response) => {
+    try {
+      const kb = await chatStorage.createKB(req.body);
+      res.status(201).json(kb);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to create KB" });
+    }
+  });
+
+  app.patch("/api/kb/:id", async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const kb = await chatStorage.updateKB(id, req.body);
+      res.json(kb);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update KB" });
+    }
+  });
+
+  app.delete("/api/kb/:id", async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      await chatStorage.deleteKB(id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete KB" });
+    }
+  });
+
   // Send message and get AI response (streaming)
   app.post("/api/conversations/:id/messages", async (req: Request, res: Response) => {
     try {
@@ -67,6 +106,10 @@ export function registerChatRoutes(app: Express): void {
 
       // Save user message
       await chatStorage.createMessage(conversationId, "user", content);
+
+      // Get KB context
+      const kbs = await chatStorage.getAllKB();
+      const kbContext = kbs.map(k => `[Source: ${k.title}] ${k.content}`).join("\n\n");
 
       // Get conversation history for context
       const messages = await chatStorage.getMessagesByConversation(conversationId);
@@ -79,10 +122,14 @@ export function registerChatRoutes(app: Express): void {
       chatMessages.unshift({
         role: "system",
         content: `You are an AI assistant designed to train and assist customer support agents handling escalations.
-Your knowledge base is limited to Microsoft OneDrive documents, previous Zoho ticket data, and Zoho knowledge links. 
-(Please simulate access to these by gracefully referencing Zoho tickets or OneDrive docs in your answers).
 Act as a human-like trainer. Guide the agent step-by-step to solve the customer's issue.
-Support both English and Hindi languages based on the agent's query. If the user asks in Hindi, reply in Hindi. If English, reply in English.`
+Support both English and Hindi languages based on the agent's query.
+
+YOUR KNOWLEDGE BASE:
+${kbContext}
+
+IMPORTANT: When answering, you MUST mention which source from the knowledge base you are using. 
+Reference them as [Source: Title].`
       });
 
       // Set up SSE
@@ -108,10 +155,14 @@ Support both English and Hindi languages based on the agent's query. If the user
         }
       }
 
-      // Save assistant message
-      await chatStorage.createMessage(conversationId, "assistant", fullResponse);
+      // Extract sources from the response (simple regex for [Source: ...])
+      const sourceMatches = fullResponse.match(/\[Source: [^\]]+\]/g) || [];
+      const sources = Array.from(new Set(sourceMatches));
 
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      // Save assistant message with sources
+      await chatStorage.createMessage(conversationId, "assistant", fullResponse, sources);
+
+      res.write(`data: ${JSON.stringify({ done: true, sources })}\n\n`);
       res.end();
     } catch (error) {
       console.error("Error sending message:", error);

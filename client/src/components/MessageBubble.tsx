@@ -1,15 +1,16 @@
-import { Bot, User } from "lucide-react";
+import { Bot, User, BookOpen } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { format } from "date-fns";
 
 interface MessageBubbleProps {
   role: "user" | "assistant";
   content: string;
+  sources?: string[]; // Added sources
   createdAt?: string | Date;
   isStreaming?: boolean;
 }
 
-export function MessageBubble({ role, content, createdAt, isStreaming }: MessageBubbleProps) {
+export function MessageBubble({ role, content, sources, createdAt, isStreaming }: MessageBubbleProps) {
   const isUser = role === "user";
 
   return (
@@ -37,7 +38,23 @@ export function MessageBubble({ role, content, createdAt, isStreaming }: Message
             ) : (
               <div className="prose prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-muted/50 prose-pre:text-foreground prose-a:text-primary">
                 {content ? (
-                  <ReactMarkdown>{content}</ReactMarkdown>
+                  <>
+                    <ReactMarkdown>{content}</ReactMarkdown>
+                    {sources && sources.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-border/50">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1">
+                          <BookOpen className="w-3 h-3" /> Sources Used
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {sources.map((s, i) => (
+                            <span key={i} className="px-2 py-0.5 bg-muted rounded text-[10px] text-muted-foreground border border-border/50">
+                              {s}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="flex gap-1 py-1">
                     <div className="w-1.5 h-1.5 bg-primary/40 rounded-full typing-dot" />

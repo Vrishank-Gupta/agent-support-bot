@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, MessageSquare, Trash2, Settings, Bot } from "lucide-react";
+import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen } from "lucide-react";
 import { useConversations, useCreateConversation, useDeleteConversation } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
@@ -22,12 +22,24 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
     <div className="w-72 bg-card border-r border-border h-full flex flex-col shadow-xl shadow-black/5 z-10 relative">
       {/* Header */}
       <div className="p-4 border-b border-border/50 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="bg-primary/10 text-primary p-2 rounded-xl">
-            <Bot className="w-5 h-5" />
+        <Link href="/">
+          <div className="flex items-center gap-2 cursor-pointer">
+            <div className="bg-primary/10 text-primary p-2 rounded-xl">
+              <Bot className="w-5 h-5" />
+            </div>
+            <span className="font-display font-semibold text-lg text-foreground">Support AI</span>
           </div>
-          <span className="font-display font-semibold text-lg text-foreground">Support AI</span>
-        </div>
+        </Link>
+      </div>
+
+      {/* KB Manager Link */}
+      <div className="px-4 pt-4">
+        <Link href="/kb">
+          <Button variant="ghost" className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground">
+            <BookOpen className="w-4 h-4" />
+            Knowledge Base
+          </Button>
+        </Link>
       </div>
 
       {/* New Chat Button */}

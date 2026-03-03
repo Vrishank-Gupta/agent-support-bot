@@ -51,6 +51,40 @@ export const api = {
         200: z.any() // SSE stream, not strictly typed with Zod
       }
     }
+  },
+  knowledgeBase: {
+    list: {
+      method: 'GET' as const,
+      path: '/api/kb' as const,
+      responses: {
+        200: z.array(z.custom<typeof knowledgeBase.$inferSelect>()),
+      }
+    },
+    create: {
+      method: 'POST' as const,
+      path: '/api/kb' as const,
+      input: z.object({ title: z.string(), content: z.string(), type: z.string() }),
+      responses: {
+        201: z.custom<typeof knowledgeBase.$inferSelect>(),
+      }
+    },
+    update: {
+      method: 'PATCH' as const,
+      path: '/api/kb/:id' as const,
+      input: z.object({ title: z.string().optional(), content: z.string().optional(), type: z.string().optional() }),
+      responses: {
+        200: z.custom<typeof knowledgeBase.$inferSelect>(),
+        404: errorSchemas.notFound,
+      }
+    },
+    delete: {
+      method: 'DELETE' as const,
+      path: '/api/kb/:id' as const,
+      responses: {
+        204: z.void(),
+        404: errorSchemas.notFound,
+      }
+    }
   }
 };
 
