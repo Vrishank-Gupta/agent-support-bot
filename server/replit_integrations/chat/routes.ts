@@ -1,6 +1,12 @@
 import type { Express, Request, Response } from "express";
 import OpenAI from "openai";
+import multer from "multer";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const pdf = require("pdf-parse");
 import { chatStorage } from "./storage";
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -56,6 +62,51 @@ export function registerChatRoutes(app: Express): void {
     } catch (error) {
       console.error("Error deleting conversation:", error);
       res.status(500).json({ error: "Failed to delete conversation" });
+    }
+  });
+
+  // File upload to KB
+  app.post("/api/kb/upload", upload.single("file"), async (req: Request, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const { originalname, mimetype, buffer } = req.file;
+      let content = "";
+      const title = `OneDrive: ${originalname}`;
+
+      if (mimetype === "application/pdf" || originalname.endsWith(".pdf")) {
+        const parsed = await pdf(buffer);
+        content = parsed.text.slice(0, 50000); // cap at 50k chars
+      } else if (
+        mimetype === "text/plain" ||
+        originalname.endsWith(".txt") ||
+        originalname.endsWith(".md")
+      ) {
+        content = buffer.toString("utf-8").slice(0, 50000);
+      } else if (
+        originalname.endsWith(".docx") ||
+        originalname.endsWith(".doc")
+      ) {
+        // For Word docs, read as text (basic extraction)
+        content = buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
+      } else {
+        content = buffer.toString("utf-8").slice(0, 50000);
+      }
+
+      if (!content.trim()) {
+        return res.status(422).json({ error: "Could not extract text from file. Please try a .txt or .pdf file." });
+      }
+
+      const kb = await chatStorage.createKB({
+        title,
+        content: content.trim(),
+        type: "onedrive",
+      });
+
+      res.status(201).json(kb);
+    } catch (error) {
+      console.error("File upload error:", error);
+      res.status(500).json({ error: "Failed to process file" });
     }
   });
 
