@@ -22,6 +22,8 @@ export const knowledgeBase = pgTable("knowledge_base", {
   title: text("title").notNull(),
   content: text("content").notNull(),
   type: text("type").notNull(), // 'onedrive', 'zoho_ticket', 'zoho_kb', 'manual'
+  productCategories: text("product_categories").array().default([]).notNull(),
+  modelNumbers: text("model_numbers").array().default([]).notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

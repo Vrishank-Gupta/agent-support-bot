@@ -39,6 +39,13 @@ A chat-based AI bot for customer support agents and escalation staff. Supports E
 - Currently, file import works via local file upload (PDF, TXT, MD up to 20 MB).
 - The "Connect OneDrive" button in the KB Manager is shown as "Coming Soon" until OAuth is authorized.
 
+## KB Tagging
+Every KB entry has two multi-value tag fields:
+- **productCategories** (`text[]`) — Product category tags (e.g. "Router", "Switch", "Firewall")
+- **modelNumbers** (`text[]`) — Model number tags (e.g. "RV340", "ASA5505")
+
+On file upload, a tag dialog opens requiring the user to add at least one product category and one model number before the import proceeds. On manual entry, the same tag fields appear in the form. Tags are displayed as coloured chips on each KB card and are included in the system prompt context sent to the AI.
+
 ## KB Entry Types
 - `onedrive` — Imported from OneDrive or local file upload
 - `zoho_ticket` — Zoho CRM ticket data

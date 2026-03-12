@@ -97,10 +97,20 @@ export function registerChatRoutes(app: Express): void {
         return res.status(422).json({ error: "Could not extract text from file. Please try a .txt or .pdf file." });
       }
 
+      // Parse multi-value tag fields sent as JSON strings from formdata
+      let productCategories: string[] = [];
+      let modelNumbers: string[] = [];
+      try {
+        if (req.body.productCategories) productCategories = JSON.parse(req.body.productCategories);
+        if (req.body.modelNumbers) modelNumbers = JSON.parse(req.body.modelNumbers);
+      } catch {}
+
       const kb = await chatStorage.createKB({
         title,
         content: content.trim(),
         type: "onedrive",
+        productCategories,
+        modelNumbers,
       });
 
       res.status(201).json(kb);
@@ -160,7 +170,13 @@ export function registerChatRoutes(app: Express): void {
 
       // Get KB context
       const kbs = await chatStorage.getAllKB();
-      const kbContext = kbs.map(k => `[Source: ${k.title}] ${k.content}`).join("\n\n");
+      const kbContext = kbs.map(k => {
+        const tags: string[] = [];
+        if (k.productCategories?.length) tags.push(`Product: ${k.productCategories.join(", ")}`);
+        if (k.modelNumbers?.length) tags.push(`Model: ${k.modelNumbers.join(", ")}`);
+        const tagStr = tags.length ? ` [${tags.join(" | ")}]` : "";
+        return `[Source: ${k.title}]${tagStr}\n${k.content}`;
+      }).join("\n\n");
 
       // Get conversation history for context
       const messages = await chatStorage.getMessagesByConversation(conversationId);
