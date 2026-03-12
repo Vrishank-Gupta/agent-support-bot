@@ -188,16 +188,35 @@ export function KBManager() {
     setOdPendingTags({ productCategories: [], modelNumbers: [] });
   };
 
+  /* Extract a human-readable name from OneDrive / SharePoint sharing URLs */
+  const extractOdTitle = (url: string): string => {
+    try {
+      const parsed = new URL(url);
+      // SharePoint pattern: ?id=/path/to/FileName or ?id=...%2FFileName
+      const idParam = parsed.searchParams.get("id");
+      if (idParam) {
+        const decoded = decodeURIComponent(idParam);
+        const segment = decoded.split("/").filter(Boolean).pop();
+        if (segment) return `OneDrive: ${segment}`;
+      }
+      // OneDrive personal pattern: extract from path segments, ignore known system paths
+      const skipSegments = new Set(["_layouts", "15", "onedrive.aspx", "download.aspx", "embed", "view.aspx"]);
+      const pathParts = parsed.pathname.split("/").filter(p => p && !skipSegments.has(p));
+      const last = pathParts.pop();
+      if (last) return `OneDrive: ${decodeURIComponent(last).replace(/\?.*$/, "")}`;
+    } catch {}
+    return "OneDrive Document";
+  };
+
   const executeOdImport = async () => {
     if (!odUrl.trim() || !odPendingTags) return;
     setOdPendingTags(null);
     setOdUrlStatus("loading");
     try {
-      const filename = odUrl.split("/").filter(Boolean).pop() || "OneDrive Document";
-      const title = `OneDrive: ${decodeURIComponent(filename).replace(/\?.*$/, "")}`;
+      const title = extractOdTitle(odUrl);
       await apiRequest("POST", "/api/kb", {
         title,
-        content: `[OneDrive Link] ${odUrl}\n\nNote: This KB entry references a OneDrive document. To make the AI use this content, also paste the document text here by editing this entry.`,
+        content: `[OneDrive Link] ${odUrl}\n\n⚠️ Content not yet pasted. Edit this entry and paste the document text so the AI can use it.`,
         type: "onedrive",
         productCategories: odPendingTags.productCategories,
         modelNumbers: odPendingTags.modelNumbers,
@@ -553,7 +572,16 @@ export function KBManager() {
                           onChange={e => setEditForm({ ...editForm, content: e.target.value })}
                         />
                       ) : (
-                        <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed">{kb.content}</p>
+                        <>
+                          {/* Warn when OneDrive entry has no real content yet */}
+                          {kb.type === "onedrive" && kb.content.includes("Content not yet pasted") && (
+                            <div className="flex items-start gap-2 mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <span>Document content not yet pasted — the AI can see the link but cannot read the file. Edit this entry and paste the document text.</span>
+                            </div>
+                          )}
+                          <p className="text-sm text-muted-foreground line-clamp-4 leading-relaxed">{kb.content}</p>
+                        </>
                       )}
                     </CardContent>
 
