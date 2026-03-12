@@ -6,66 +6,171 @@ const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
 import { chatStorage } from "./storage";
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
 export function registerChatRoutes(app: Express): void {
-  // Get all conversations
+
+  // ══════════════════════════════════════════════════
+  // AUTH / WHITELIST CHECK
+  // ══════════════════════════════════════════════════
+
+  // Check if an email is whitelisted and return user info
+  app.post("/api/auth/check-email", async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ error: "Email required" });
+
+      // If whitelist is empty, the first user becomes admin
+      const isEmpty = await chatStorage.isWhitelistEmpty();
+      if (isEmpty) {
+        const adminUser = await chatStorage.createUser({
+          email,
+          role: "admin",
+          canAddKB: true,
+          name: null,
+        });
+        return res.json({ allowed: true, user: adminUser, isFirstAdmin: true });
+      }
+
+      const user = await chatStorage.getUserByEmail(email);
+      if (!user) return res.json({ allowed: false });
+      return res.json({ allowed: true, user });
+    } catch (error) {
+      console.error("Email check error:", error);
+      res.status(500).json({ error: "Failed to check email" });
+    }
+  });
+
+  // ══════════════════════════════════════════════════
+  // ADMIN ROUTES (protected by admin email header)
+  // ══════════════════════════════════════════════════
+
+  async function requireAdmin(req: Request, res: Response): Promise<boolean> {
+    const email = req.headers["x-user-email"] as string;
+    if (!email) { res.status(401).json({ error: "Unauthorized" }); return false; }
+    const user = await chatStorage.getUserByEmail(email);
+    if (!user || user.role !== "admin") { res.status(403).json({ error: "Admin access required" }); return false; }
+    return true;
+  }
+
+  // List all users
+  app.get("/api/admin/users", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const users = await chatStorage.getAllUsers();
+      res.json(users);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+
+  // Add a user to whitelist
+  app.post("/api/admin/users", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const { email, name, role, canAddKB } = req.body;
+      if (!email) return res.status(400).json({ error: "Email required" });
+
+      const existing = await chatStorage.getUserByEmail(email);
+      if (existing) return res.status(409).json({ error: "Email already whitelisted" });
+
+      const user = await chatStorage.createUser({ email, name: name || null, role: role || "agent", canAddKB: !!canAddKB });
+      res.status(201).json(user);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to add user" });
+    }
+  });
+
+  // Update user
+  app.patch("/api/admin/users/:id", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const id = parseInt(req.params.id);
+      const { name, role, canAddKB } = req.body;
+      const user = await chatStorage.updateUser(id, { name, role, canAddKB });
+      res.json(user);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+
+  // Delete user
+  app.delete("/api/admin/users/:id", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const id = parseInt(req.params.id);
+      await chatStorage.deleteUser(id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete user" });
+    }
+  });
+
+  // Token usage stats
+  app.get("/api/admin/tokens", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const stats = await chatStorage.getTokenStats();
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch token stats" });
+    }
+  });
+
+  // ══════════════════════════════════════════════════
+  // CONVERSATIONS
+  // ══════════════════════════════════════════════════
+
   app.get("/api/conversations", async (req: Request, res: Response) => {
     try {
       const conversations = await chatStorage.getAllConversations();
       res.json(conversations);
     } catch (error) {
-      console.error("Error fetching conversations:", error);
       res.status(500).json({ error: "Failed to fetch conversations" });
     }
   });
 
-  // Get single conversation with messages
   app.get("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const conversation = await chatStorage.getConversation(id);
-      if (!conversation) {
-        return res.status(404).json({ error: "Conversation not found" });
-      }
+      if (!conversation) return res.status(404).json({ error: "Conversation not found" });
       const messages = await chatStorage.getMessagesByConversation(id);
       res.json({ ...conversation, messages });
     } catch (error) {
-      console.error("Error fetching conversation:", error);
       res.status(500).json({ error: "Failed to fetch conversation" });
     }
   });
 
-  // Create new conversation
   app.post("/api/conversations", async (req: Request, res: Response) => {
     try {
       const { title } = req.body;
       const conversation = await chatStorage.createConversation(title || "New Chat");
       res.status(201).json(conversation);
     } catch (error) {
-      console.error("Error creating conversation:", error);
       res.status(500).json({ error: "Failed to create conversation" });
     }
   });
 
-  // Delete conversation
   app.delete("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       await chatStorage.deleteConversation(id);
       res.status(204).send();
     } catch (error) {
-      console.error("Error deleting conversation:", error);
       res.status(500).json({ error: "Failed to delete conversation" });
     }
   });
 
-  // File upload to KB
+  // ══════════════════════════════════════════════════
+  // FILE UPLOAD TO KB
+  // ══════════════════════════════════════════════════
+
   app.post("/api/kb/upload", upload.single("file"), async (req: Request, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -76,28 +181,17 @@ export function registerChatRoutes(app: Express): void {
 
       if (mimetype === "application/pdf" || originalname.endsWith(".pdf")) {
         const parsed = await pdf(buffer);
-        content = parsed.text.slice(0, 50000); // cap at 50k chars
-      } else if (
-        mimetype === "text/plain" ||
-        originalname.endsWith(".txt") ||
-        originalname.endsWith(".md")
-      ) {
+        content = parsed.text.slice(0, 50000);
+      } else if (mimetype === "text/plain" || originalname.endsWith(".txt") || originalname.endsWith(".md")) {
         content = buffer.toString("utf-8").slice(0, 50000);
-      } else if (
-        originalname.endsWith(".docx") ||
-        originalname.endsWith(".doc")
-      ) {
-        // For Word docs, read as text (basic extraction)
-        content = buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
       } else {
-        content = buffer.toString("utf-8").slice(0, 50000);
+        content = buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
       }
 
       if (!content.trim()) {
         return res.status(422).json({ error: "Could not extract text from file. Please try a .txt or .pdf file." });
       }
 
-      // Parse multi-value tag fields sent as JSON strings from formdata
       let productCategories: string[] = [];
       let modelNumbers: string[] = [];
       try {
@@ -105,14 +199,7 @@ export function registerChatRoutes(app: Express): void {
         if (req.body.modelNumbers) modelNumbers = JSON.parse(req.body.modelNumbers);
       } catch {}
 
-      const kb = await chatStorage.createKB({
-        title,
-        content: content.trim(),
-        type: "onedrive",
-        productCategories,
-        modelNumbers,
-      });
-
+      const kb = await chatStorage.createKB({ title, content: content.trim(), type: "onedrive", productCategories, modelNumbers });
       res.status(201).json(kb);
     } catch (error) {
       console.error("File upload error:", error);
@@ -120,7 +207,10 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
-  // KB Routes
+  // ══════════════════════════════════════════════════
+  // KB CRUD
+  // ══════════════════════════════════════════════════
+
   app.get("/api/kb", async (req: Request, res: Response) => {
     try {
       const kbs = await chatStorage.getAllKB();
@@ -159,16 +249,17 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
-  // Send message and get AI response (streaming)
+  // ══════════════════════════════════════════════════
+  // CHAT (SSE streaming)
+  // ══════════════════════════════════════════════════
+
   app.post("/api/conversations/:id/messages", async (req: Request, res: Response) => {
     try {
       const conversationId = parseInt(req.params.id);
       const { content } = req.body;
 
-      // Save user message
       await chatStorage.createMessage(conversationId, "user", content);
 
-      // Get KB context
       const kbs = await chatStorage.getAllKB();
       const kbContext = kbs.map(k => {
         const tags: string[] = [];
@@ -178,14 +269,12 @@ export function registerChatRoutes(app: Express): void {
         return `[Source: ${k.title}]${tagStr}\n${k.content}`;
       }).join("\n\n");
 
-      // Get conversation history for context
       const messages = await chatStorage.getMessagesByConversation(conversationId);
       const chatMessages = messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
 
-      // System instructions as requested
       chatMessages.unshift({
         role: "system",
         content: `You are an AI assistant designed to train and assist customer support agents handling escalations.
@@ -196,44 +285,52 @@ YOUR KNOWLEDGE BASE:
 ${kbContext}
 
 IMPORTANT: When answering, you MUST mention which source from the knowledge base you are using. 
-Reference them as [Source: Title].`
+Reference them as [Source: Title].`,
       });
 
-      // Set up SSE
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      // Stream response from OpenAI
       const stream = await openai.chat.completions.create({
         model: "gpt-5.2",
         messages: chatMessages as any,
         stream: true,
+        stream_options: { include_usage: true },
         max_completion_tokens: 8192,
       });
 
       let fullResponse = "";
+      let promptTokens = 0;
+      let completionTokens = 0;
 
       for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || "";
-        if (content) {
-          fullResponse += content;
-          res.write(`data: ${JSON.stringify({ content })}\n\n`);
+        const delta = chunk.choices[0]?.delta?.content || "";
+        if (delta) {
+          fullResponse += delta;
+          res.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
+        }
+        // Capture usage from final chunk
+        if (chunk.usage) {
+          promptTokens = chunk.usage.prompt_tokens ?? 0;
+          completionTokens = chunk.usage.completion_tokens ?? 0;
         }
       }
 
-      // Extract sources from the response (simple regex for [Source: ...])
       const sourceMatches = fullResponse.match(/\[Source: [^\]]+\]/g) || [];
       const sources = Array.from(new Set(sourceMatches));
 
-      // Save assistant message with sources
-      await chatStorage.createMessage(conversationId, "assistant", fullResponse, sources);
+      const savedMsg = await chatStorage.createMessage(conversationId, "assistant", fullResponse, sources);
 
-      res.write(`data: ${JSON.stringify({ done: true, sources })}\n\n`);
+      // Record token usage
+      if (promptTokens > 0 || completionTokens > 0) {
+        await chatStorage.recordTokenUsage(conversationId, savedMsg.id, promptTokens, completionTokens);
+      }
+
+      res.write(`data: ${JSON.stringify({ done: true, sources, usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens } })}\n\n`);
       res.end();
     } catch (error) {
       console.error("Error sending message:", error);
-      // Check if headers already sent (SSE streaming started)
       if (res.headersSent) {
         res.write(`data: ${JSON.stringify({ error: "Failed to send message" })}\n\n`);
         res.end();

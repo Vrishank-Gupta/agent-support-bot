@@ -6,15 +6,21 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import { Layout } from "@/pages/Layout";
 import { KBManager } from "@/pages/KBManager";
+import { AdminPanel } from "@/pages/AdminPanel";
+import { UserProvider } from "@/lib/userContext";
+import { EmailGate } from "@/components/EmailGate";
 
 function Router() {
   return (
-    <Switch>
-      <Route path="/" component={Layout} />
-      <Route path="/chat/:id" component={Layout} />
-      <Route path="/kb" component={KBManager} />
-      <Route component={NotFound} />
-    </Switch>
+    <EmailGate>
+      <Switch>
+        <Route path="/" component={Layout} />
+        <Route path="/chat/:id" component={Layout} />
+        <Route path="/kb" component={KBManager} />
+        <Route path="/admin" component={AdminPanel} />
+        <Route component={NotFound} />
+      </Switch>
+    </EmailGate>
   );
 }
 
@@ -22,8 +28,10 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <Toaster />
-        <Router />
+        <UserProvider>
+          <Toaster />
+          <Router />
+        </UserProvider>
       </TooltipProvider>
     </QueryClientProvider>
   );

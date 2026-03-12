@@ -1,14 +1,16 @@
 import { Link, useLocation } from "wouter";
-import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen } from "lucide-react";
+import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User } from "lucide-react";
 import { useConversations, useCreateConversation, useDeleteConversation } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
+import { useUser } from "@/lib/userContext";
 
 export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolean, onToggleWidget: () => void }) {
   const [location, setLocation] = useLocation();
   const { data: conversations, isLoading } = useConversations();
   const createChat = useCreateConversation();
   const deleteChat = useDeleteConversation();
+  const { currentUser, isAdmin, logout } = useUser();
 
   const handleCreate = () => {
     createChat.mutate("New Support Session", {
@@ -32,20 +34,35 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
         </Link>
       </div>
 
-      {/* KB Manager Link */}
-      <div className="px-4 pt-4">
+      {/* Nav Links */}
+      <div className="px-4 pt-4 space-y-1">
         <Link href="/kb">
-          <Button variant="ghost" className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground">
+          <Button
+            variant="ghost"
+            className={`w-full justify-start gap-2 ${location === "/kb" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
             <BookOpen className="w-4 h-4" />
             Knowledge Base
           </Button>
         </Link>
+
+        {isAdmin && (
+          <Link href="/admin">
+            <Button
+              variant="ghost"
+              className={`w-full justify-start gap-2 ${location === "/admin" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              <ShieldCheck className="w-4 h-4" />
+              Admin Panel
+            </Button>
+          </Link>
+        )}
       </div>
 
       {/* New Chat Button */}
       <div className="p-4">
-        <Button 
-          onClick={handleCreate} 
+        <Button
+          onClick={handleCreate}
           disabled={createChat.isPending}
           className="w-full justify-start gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200"
         >
@@ -59,7 +76,7 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
         <div className="px-2 pb-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
           Recent Sessions
         </div>
-        
+
         {isLoading ? (
           <div className="space-y-2 px-2">
             {[1, 2, 3].map(i => (
@@ -74,11 +91,11 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
           conversations?.map((conv) => {
             const isActive = location === `/chat/${conv.id}`;
             return (
-              <div 
-                key={conv.id} 
+              <div
+                key={conv.id}
                 className={`group flex items-center justify-between p-2 rounded-xl transition-all duration-200 cursor-pointer border ${
-                  isActive 
-                    ? "bg-primary/5 border-primary/20 text-primary shadow-sm" 
+                  isActive
+                    ? "bg-primary/5 border-primary/20 text-primary shadow-sm"
                     : "hover:bg-muted border-transparent text-muted-foreground hover:text-foreground"
                 }`}
                 onClick={() => setLocation(`/chat/${conv.id}`)}
@@ -92,8 +109,8 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
                     </span>
                   </div>
                 </div>
-                
-                <button 
+
+                <button
                   onClick={(e) => {
                     e.stopPropagation();
                     if (confirm("Delete this session?")) deleteChat.mutate(conv.id);
@@ -108,10 +125,31 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
         )}
       </div>
 
-      {/* Footer / Settings */}
-      <div className="p-4 border-t border-border/50 bg-muted/30">
-        <Button 
-          variant="outline" 
+      {/* Footer */}
+      <div className="p-4 border-t border-border/50 space-y-2">
+        {/* Current user info */}
+        {currentUser && (
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-muted/40 text-sm">
+            <div className="w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
+              <User className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-foreground truncate">{currentUser.name || currentUser.email}</p>
+              <p className="text-[10px] text-muted-foreground capitalize">{currentUser.role}</p>
+            </div>
+            <button
+              onClick={logout}
+              className="p-1 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground"
+              title="Sign out"
+              data-testid="button-logout"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        <Button
+          variant="outline"
           onClick={onToggleWidget}
           className="w-full justify-start gap-2 bg-background hover:bg-muted border-border/50 shadow-sm"
         >

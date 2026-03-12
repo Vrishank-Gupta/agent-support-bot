@@ -22,10 +22,32 @@ A chat-based AI bot for customer support agents and escalation staff. Supports E
 ## Features
 1. **Chat with AI** — Streaming SSE responses from GPT-5.2
 2. **Source Attribution** — Bot cites KB sources as `[Source: ...]` tags rendered as badges
-3. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD), type tagging
+3. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD), type tagging, OneDrive URL import
 4. **File Import** — Upload PDF/TXT/Markdown files; text extracted server-side using `pdf-parse` + multer
 5. **Widget Mode** — Zoho CRM embed-ready via `?widget=true` query param
 6. **Multi-language** — English and Hindi supported via system prompt
+7. **Email Gate** — Users must enter a whitelisted email to access the app. First user auto-becomes admin.
+8. **Admin Panel** (`/admin`) — Manage whitelisted users, set roles (admin/agent) and KB permissions
+9. **Token Tracking** — Every AI response records prompt/completion/total tokens in `token_usage` table; viewable in admin panel
+
+## Auth Flow
+- On first visit, users see an email prompt (EmailGate component)
+- Email is checked against `whitelisted_users` table via `POST /api/auth/check-email`
+- If the whitelist is empty, the first user is automatically created as admin
+- User info (role, canAddKB) is stored in `localStorage` and provided via `UserProvider` context
+- Admin link appears in sidebar only for admin users
+- Logout button in sidebar clears localStorage
+
+## Permissions
+- `role: "admin"` — can do everything including admin panel access
+- `role: "agent"` with `canAddKB: true` — can add/edit/delete KB entries
+- `role: "agent"` with `canAddKB: false` — read-only access to KB
+- All admin API routes require `x-user-email` header and admin role check
+
+## Key New Files
+- `client/src/lib/userContext.tsx` — UserProvider and useUser/useAuthHeaders hooks
+- `client/src/components/EmailGate.tsx` — Email verification overlay
+- `client/src/pages/AdminPanel.tsx` — Admin panel (users + token stats)
 
 ## Environment Variables
 - `AI_INTEGRATIONS_OPENAI_API_KEY` — Set automatically by Replit AI integration

@@ -7,12 +7,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sidebar } from "@/components/Sidebar";
 import {
   Plus, Trash2, Edit2, Save, X, Upload, FileText, Cloud,
-  CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag
+  CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag, Link2, Lock
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useUser } from "@/lib/userContext";
 import type { KnowledgeBase } from "@shared/schema";
 
 /* ── Tag chip input ─────────────────────────────────── */
@@ -89,6 +91,7 @@ interface PendingFile {
 ══════════════════════════════════════════════════════ */
 export function KBManager() {
   const { toast } = useToast();
+  const { canAddKB } = useUser();
 
   // Editing / adding state
   const [isEditing, setIsEditing] = useState<number | null>(null);
@@ -107,6 +110,11 @@ export function KBManager() {
 
   // Tag dialog for file upload
   const [pendingFile, setPendingFile] = useState<PendingFile | null>(null);
+
+  // OneDrive URL state
+  const [odUrl, setOdUrl] = useState("");
+  const [odUrlStatus, setOdUrlStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [odPendingTags, setOdPendingTags] = useState<{ productCategories: string[]; modelNumbers: string[] } | null>(null);
 
   const { data: kbs, isLoading } = useQuery<KnowledgeBase[]>({ queryKey: ["/api/kb"] });
 
@@ -174,6 +182,37 @@ export function KBManager() {
     setPendingFile({ file, productCategories: [], modelNumbers: [] });
   };
 
+  /* OneDrive URL submit — opens tag dialog */
+  const handleOdUrlSubmit = () => {
+    if (!odUrl.trim()) return;
+    setOdPendingTags({ productCategories: [], modelNumbers: [] });
+  };
+
+  const executeOdImport = async () => {
+    if (!odUrl.trim() || !odPendingTags) return;
+    setOdPendingTags(null);
+    setOdUrlStatus("loading");
+    try {
+      const filename = odUrl.split("/").filter(Boolean).pop() || "OneDrive Document";
+      const title = `OneDrive: ${decodeURIComponent(filename).replace(/\?.*$/, "")}`;
+      await apiRequest("POST", "/api/kb", {
+        title,
+        content: `[OneDrive Link] ${odUrl}\n\nNote: This KB entry references a OneDrive document. To make the AI use this content, also paste the document text here by editing this entry.`,
+        type: "onedrive",
+        productCategories: odPendingTags.productCategories,
+        modelNumbers: odPendingTags.modelNumbers,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
+      setOdUrlStatus("success");
+      setOdUrl("");
+      toast({ title: "OneDrive link added", description: "Edit the entry to paste document content for AI access." });
+      setTimeout(() => setOdUrlStatus("idle"), 3000);
+    } catch {
+      setOdUrlStatus("error");
+      setTimeout(() => setOdUrlStatus("idle"), 4000);
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
@@ -197,94 +236,128 @@ export function KBManager() {
               {kbs?.length ?? 0} source{kbs?.length !== 1 ? "s" : ""} · bot uses all sources when answering
             </p>
           </div>
-          <Button
-            onClick={() => { setIsAdding(true); setEditForm({ title: "", content: "", type: "manual", productCategories: [], modelNumbers: [] }); }}
-            className="gap-2"
-            data-testid="button-add-source"
-          >
-            <Plus className="w-4 h-4" /> Add Manually
-          </Button>
+          {canAddKB ? (
+            <Button
+              onClick={() => { setIsAdding(true); setEditForm({ title: "", content: "", type: "manual", productCategories: [], modelNumbers: [] }); }}
+              className="gap-2"
+              data-testid="button-add-source"
+            >
+              <Plus className="w-4 h-4" /> Add Manually
+            </Button>
+          ) : (
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground bg-muted/50 border border-border rounded-lg px-3 py-1.5">
+              <Lock className="w-3.5 h-3.5" /> View only
+            </div>
+          )}
         </div>
 
         <div className="p-8 max-w-5xl mx-auto w-full space-y-8">
 
           {/* ── Upload zone ── */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Cloud className="w-5 h-5 text-blue-500" />
-                Import from OneDrive / Local Files
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div
-                data-testid="dropzone"
-                onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                onClick={() => uploadStatus === "idle" && fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
-                  isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-muted/40"
-                }`}
-              >
-                {uploadStatus === "uploading" ? (
-                  <div className="flex flex-col items-center gap-3">
-                    <Loader2 className="w-10 h-10 text-primary animate-spin" />
-                    <p className="text-sm text-muted-foreground">{uploadMessage}</p>
-                  </div>
-                ) : uploadStatus === "success" ? (
-                  <div className="flex flex-col items-center gap-3">
-                    <CheckCircle2 className="w-10 h-10 text-green-500" />
-                    <p className="text-sm text-green-600 font-medium">{uploadMessage}</p>
-                  </div>
-                ) : uploadStatus === "error" ? (
-                  <div className="flex flex-col items-center gap-3">
-                    <AlertCircle className="w-10 h-10 text-destructive" />
-                    <p className="text-sm text-destructive">{uploadMessage}</p>
-                    <p className="text-xs text-muted-foreground">Click to try again</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-3">
-                    <Upload className="w-10 h-10 text-muted-foreground" />
-                    <div>
-                      <p className="font-medium text-foreground">Drag & drop files here, or click to browse</p>
-                      <p className="text-sm text-muted-foreground mt-1">PDF, TXT, Markdown — up to 20 MB · You'll tag product & model before import</p>
-                    </div>
-                  </div>
-                )}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".pdf,.txt,.md,.doc,.docx"
-                  className="hidden"
-                  data-testid="input-file-upload"
-                  onChange={e => {
-                    const file = e.target.files?.[0];
-                    if (file) openTagDialog(file);
-                    e.target.value = "";
-                  }}
-                />
-              </div>
+          {canAddKB && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Cloud className="w-5 h-5 text-blue-500" />
+                  Import from OneDrive / Local Files
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Tabs defaultValue="file">
+                  <TabsList className="mb-4">
+                    <TabsTrigger value="file" className="gap-2"><Upload className="w-3.5 h-3.5" /> Upload File</TabsTrigger>
+                    <TabsTrigger value="url" className="gap-2"><Link2 className="w-3.5 h-3.5" /> OneDrive URL</TabsTrigger>
+                  </TabsList>
 
-              {/* OneDrive coming soon */}
-              <div className="flex items-center gap-3 p-4 rounded-lg border border-dashed border-border bg-muted/20">
-                <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center shrink-0">
-                  <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none">
-                    <path d="M3 16.5C3 18.43 4.57 20 6.5 20h11C19.43 20 21 18.43 21 16.5c0-1.64-1.11-3.02-2.63-3.42-.07-.33-.19-.63-.34-.91A5.5 5.5 0 0 0 7.08 11.1 3.5 3.5 0 0 0 3 14.5" fill="#0078D4" fillOpacity=".2"/>
-                    <path d="M13.5 8C11.57 8 10 9.57 10 11.5v.08A5.5 5.5 0 0 1 18.03 13.08C18.82 13.58 19.42 14.35 19.74 15.26A3.5 3.5 0 0 0 17.5 8.5a3.4 3.4 0 0 0-4-.5z" fill="#0078D4"/>
-                  </svg>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-foreground">Connect Microsoft OneDrive</p>
-                  <p className="text-xs text-muted-foreground">Browse and import documents directly from your OneDrive</p>
-                </div>
-                <Button variant="outline" size="sm" className="gap-1.5 shrink-0" disabled>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  Coming Soon
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+                  {/* File upload tab */}
+                  <TabsContent value="file" className="space-y-4">
+                    <div
+                      data-testid="dropzone"
+                      onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={handleDrop}
+                      onClick={() => uploadStatus === "idle" && fileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+                        isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-muted/40"
+                      }`}
+                    >
+                      {uploadStatus === "uploading" ? (
+                        <div className="flex flex-col items-center gap-3">
+                          <Loader2 className="w-10 h-10 text-primary animate-spin" />
+                          <p className="text-sm text-muted-foreground">{uploadMessage}</p>
+                        </div>
+                      ) : uploadStatus === "success" ? (
+                        <div className="flex flex-col items-center gap-3">
+                          <CheckCircle2 className="w-10 h-10 text-green-500" />
+                          <p className="text-sm text-green-600 font-medium">{uploadMessage}</p>
+                        </div>
+                      ) : uploadStatus === "error" ? (
+                        <div className="flex flex-col items-center gap-3">
+                          <AlertCircle className="w-10 h-10 text-destructive" />
+                          <p className="text-sm text-destructive">{uploadMessage}</p>
+                          <p className="text-xs text-muted-foreground">Click to try again</p>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-3">
+                          <Upload className="w-10 h-10 text-muted-foreground" />
+                          <div>
+                            <p className="font-medium text-foreground">Drag & drop files here, or click to browse</p>
+                            <p className="text-sm text-muted-foreground mt-1">PDF, TXT, Markdown — up to 20 MB · You'll tag product & model before import</p>
+                          </div>
+                        </div>
+                      )}
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".pdf,.txt,.md,.doc,.docx"
+                        className="hidden"
+                        data-testid="input-file-upload"
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) openTagDialog(file);
+                          e.target.value = "";
+                        }}
+                      />
+                    </div>
+                  </TabsContent>
+
+                  {/* OneDrive URL tab */}
+                  <TabsContent value="url" className="space-y-4">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-700">
+                        <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="none">
+                          <path d="M3 16.5C3 18.43 4.57 20 6.5 20h11C19.43 20 21 18.43 21 16.5c0-1.64-1.11-3.02-2.63-3.42-.07-.33-.19-.63-.34-.91A5.5 5.5 0 0 0 7.08 11.1 3.5 3.5 0 0 0 3 14.5" fill="#0078D4" fillOpacity=".3"/>
+                          <path d="M13.5 8C11.57 8 10 9.57 10 11.5v.08A5.5 5.5 0 0 1 18.03 13.08C18.82 13.58 19.42 14.35 19.74 15.26A3.5 3.5 0 0 0 17.5 8.5a3.4 3.4 0 0 0-4-.5z" fill="#0078D4"/>
+                        </svg>
+                        Paste a OneDrive sharing link. You'll be prompted for product & model tags, then edit the entry to paste document content.
+                      </div>
+                      <div className="space-y-2">
+                        <Label>OneDrive Sharing URL</Label>
+                        <div className="flex gap-2">
+                          <Input
+                            placeholder="https://onedrive.live.com/..."
+                            value={odUrl}
+                            data-testid="input-onedrive-url"
+                            onChange={e => { setOdUrl(e.target.value); setOdUrlStatus("idle"); }}
+                            className="flex-1"
+                          />
+                          <Button
+                            onClick={handleOdUrlSubmit}
+                            disabled={!odUrl.trim() || odUrlStatus === "loading"}
+                            data-testid="button-onedrive-add"
+                          >
+                            {odUrlStatus === "loading" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Add"}
+                          </Button>
+                        </div>
+                        {odUrlStatus === "success" && <p className="text-sm text-green-600">Link added to KB!</p>}
+                        {odUrlStatus === "error" && <p className="text-sm text-destructive">Failed to add link.</p>}
+                      </div>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+              </CardContent>
+            </Card>
+          )}
 
           {/* ── Manual add form ── */}
           {isAdding && (
@@ -446,23 +519,27 @@ export function KBManager() {
                           </>
                         ) : (
                           <>
-                            <Button size="icon" variant="ghost" data-testid={`button-edit-kb-${kb.id}`} onClick={() => {
-                              setIsEditing(kb.id);
-                              setEditForm({
-                                title: kb.title,
-                                content: kb.content,
-                                type: kb.type,
-                                productCategories: kb.productCategories ?? [],
-                                modelNumbers: kb.modelNumbers ?? [],
-                              });
-                            }}>
-                              <Edit2 className="w-4 h-4" />
-                            </Button>
-                            <Button size="icon" variant="ghost" className="text-destructive" data-testid={`button-delete-kb-${kb.id}`} onClick={() => {
-                              if (confirm("Delete this source?")) deleteMutation.mutate(kb.id);
-                            }}>
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
+                            {canAddKB && (
+                              <>
+                                <Button size="icon" variant="ghost" data-testid={`button-edit-kb-${kb.id}`} onClick={() => {
+                                  setIsEditing(kb.id);
+                                  setEditForm({
+                                    title: kb.title,
+                                    content: kb.content,
+                                    type: kb.type,
+                                    productCategories: kb.productCategories ?? [],
+                                    modelNumbers: kb.modelNumbers ?? [],
+                                  });
+                                }}>
+                                  <Edit2 className="w-4 h-4" />
+                                </Button>
+                                <Button size="icon" variant="ghost" className="text-destructive" data-testid={`button-delete-kb-${kb.id}`} onClick={() => {
+                                  if (confirm("Delete this source?")) deleteMutation.mutate(kb.id);
+                                }}>
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </>
+                            )}
                           </>
                         )}
                       </div>
@@ -490,6 +567,49 @@ export function KBManager() {
           )}
         </div>
       </div>
+
+      {/* ── OneDrive URL tag dialog ── */}
+      <Dialog open={!!odPendingTags} onOpenChange={open => { if (!open) setOdPendingTags(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Tag className="w-5 h-5 text-primary" />
+              Tag this OneDrive document
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-1 py-1">
+            <p className="text-xs text-muted-foreground break-all font-mono bg-muted/40 rounded p-2">{odUrl}</p>
+            <p className="text-xs text-muted-foreground pt-1">Add product category and model number tags so this entry is easy to find and filter.</p>
+          </div>
+          <div className="space-y-5 py-2">
+            <TagInput
+              label="Product Category *"
+              placeholder="e.g. Router, Switch, Firewall"
+              values={odPendingTags?.productCategories ?? []}
+              onChange={v => setOdPendingTags(p => p ? { ...p, productCategories: v } : null)}
+              testId="input-od-dialog-product-category"
+            />
+            <TagInput
+              label="Model Number *"
+              placeholder="e.g. RV340, ASA5505"
+              values={odPendingTags?.modelNumbers ?? []}
+              onChange={v => setOdPendingTags(p => p ? { ...p, modelNumbers: v } : null)}
+              testId="input-od-dialog-model-number"
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" onClick={() => setOdPendingTags(null)}>Cancel</Button>
+            <Button
+              onClick={executeOdImport}
+              disabled={!odPendingTags?.productCategories.length || !odPendingTags?.modelNumbers.length || odUrlStatus === "loading"}
+              data-testid="button-od-dialog-import"
+            >
+              {odUrlStatus === "loading" ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Link2 className="w-4 h-4 mr-2" />}
+              Add to KB
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Tag dialog (shown after file selected, before upload) ── */}
       <Dialog open={!!pendingFile} onOpenChange={open => { if (!open) setPendingFile(null); }}>
