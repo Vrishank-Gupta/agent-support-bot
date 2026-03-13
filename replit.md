@@ -22,13 +22,14 @@ A chat-based AI bot for customer support agents and escalation staff. Supports E
 ## Features
 1. **Chat with AI** — Streaming SSE responses from GPT-5.2
 2. **Source Attribution** — Bot cites KB sources as `[Source: ...]` tags rendered as badges
-3. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD), type tagging, OneDrive URL import
-4. **File Import** — Upload PDF/TXT/Markdown files; text extracted server-side using `pdf-parse` + multer
-5. **Widget Mode** — Zoho CRM embed-ready via `?widget=true` query param
-6. **Multi-language** — English and Hindi supported via system prompt
-7. **Email Gate** — Users must enter a whitelisted email to access the app. First user auto-becomes admin.
-8. **Admin Panel** (`/admin`) — Manage whitelisted users, set roles (admin/agent) and KB permissions
-9. **Token Tracking** — Every AI response records prompt/completion/total tokens in `token_usage` table; viewable in admin panel
+3. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD/DOCX), type tagging, OneDrive Graph API file browser
+4. **File Import** — Upload PDF/TXT/Markdown/DOCX files; text extracted server-side using `pdf-parse`, `mammoth`, multer
+5. **OneDrive/SharePoint Integration** — Browse SharePoint folder via Graph API; select & import files directly into KB with automatic text extraction; requires `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`
+6. **Widget Mode** — Zoho CRM embed-ready via `?widget=true` query param
+7. **Multi-language** — English and Hindi supported via system prompt
+8. **Email Gate** — Users must enter a whitelisted email to access the app. First user auto-becomes admin.
+9. **Admin Panel** (`/admin`) — Manage whitelisted users, set roles (admin/agent) and KB permissions
+10. **Token Tracking** — Every AI response records prompt/completion/total tokens in `token_usage` table; viewable in admin panel
 
 ## Auth Flow
 - On first visit, users see an email prompt (EmailGate component)

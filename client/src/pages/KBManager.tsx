@@ -11,11 +11,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sidebar } from "@/components/Sidebar";
 import {
   Plus, Trash2, Edit2, Save, X, Upload, FileText, Cloud,
-  CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag, Link2, Lock
+  CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag, Link2, Lock,
+  Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/lib/userContext";
 import type { KnowledgeBase } from "@shared/schema";
+
+interface OdFileItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  isFolder: boolean;
+  size: number;
+  webUrl: string;
+  path: string;
+}
 
 /* ── Tag chip input ─────────────────────────────────── */
 function TagInput({
@@ -111,10 +122,20 @@ export function KBManager() {
   // Tag dialog for file upload
   const [pendingFile, setPendingFile] = useState<PendingFile | null>(null);
 
-  // OneDrive URL state
+  // OneDrive browser state
   const [odUrl, setOdUrl] = useState("");
   const [odUrlStatus, setOdUrlStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [odPendingTags, setOdPendingTags] = useState<{ productCategories: string[]; modelNumbers: string[] } | null>(null);
+  const [odBrowseStatus, setOdBrowseStatus] = useState<"idle" | "browsing" | "done" | "error">("idle");
+  const [odFiles, setOdFiles] = useState<OdFileItem[]>([]);
+  const [odUpn, setOdUpn] = useState("");
+  const [odBrowseError, setOdBrowseError] = useState("");
+  const [odSelected, setOdSelected] = useState<Set<string>>(new Set());
+  const [odImportTags, setOdImportTags] = useState({ productCategories: [] as string[], modelNumbers: [] as string[] });
+  const [odImportStatus, setOdImportStatus] = useState<"idle" | "importing" | "done">("idle");
+  const [odImportProgress, setOdImportProgress] = useState({ done: 0, total: 0 });
+  // Check if MS credentials are configured
+  const { data: odStatus } = useQuery<{ configured: boolean }>({ queryKey: ["/api/onedrive/status"] });
 
   const { data: kbs, isLoading } = useQuery<KnowledgeBase[]>({ queryKey: ["/api/kb"] });
 
@@ -232,6 +253,61 @@ export function KBManager() {
     }
   };
 
+  // New: browse a folder URL via Graph API
+  const handleOdBrowse = async () => {
+    if (!odUrl.trim()) return;
+    setOdBrowseStatus("browsing");
+    setOdBrowseError("");
+    setOdFiles([]);
+    setOdSelected(new Set());
+    try {
+      const res = await apiRequest("POST", "/api/onedrive/browse", { url: odUrl });
+      const data = res as { files: OdFileItem[]; parsed: { upn: string; drivePath: string } };
+      setOdFiles(data.files.filter(f => !f.isFolder)); // only files for now
+      setOdUpn(data.parsed.upn);
+      setOdBrowseStatus("done");
+    } catch (err: any) {
+      setOdBrowseError(err?.message || "Failed to browse folder");
+      setOdBrowseStatus("error");
+    }
+  };
+
+  // New: import selected files from OneDrive
+  const handleOdImportSelected = async () => {
+    const selected = odFiles.filter(f => odSelected.has(f.id));
+    if (!selected.length) return;
+    setOdImportStatus("importing");
+    setOdImportProgress({ done: 0, total: selected.length });
+
+    let done = 0;
+    for (const file of selected) {
+      try {
+        await apiRequest("POST", "/api/onedrive/import-file", {
+          fileItem: file,
+          upn: odUpn,
+          productCategories: odImportTags.productCategories,
+          modelNumbers: odImportTags.modelNumbers,
+        });
+        done++;
+        setOdImportProgress({ done, total: selected.length });
+      } catch (err: any) {
+        toast({ title: `Failed to import ${file.name}`, description: err?.message, variant: "destructive" });
+      }
+    }
+
+    await queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
+    setOdImportStatus("done");
+    toast({ title: `${done}/${selected.length} files imported to KB` });
+    setTimeout(() => {
+      setOdImportStatus("idle");
+      setOdBrowseStatus("idle");
+      setOdFiles([]);
+      setOdSelected(new Set());
+      setOdUrl("");
+      setOdImportTags({ productCategories: [], modelNumbers: [] });
+    }, 2000);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
@@ -343,34 +419,144 @@ export function KBManager() {
                   {/* OneDrive URL tab */}
                   <TabsContent value="url" className="space-y-4">
                     <div className="space-y-3">
+                      {/* Credentials warning */}
+                      {odStatus && !odStatus.configured && (
+                        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">
+                          <Settings2 className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>
+                            Microsoft credentials are not configured. Ask your admin to set{" "}
+                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_TENANT_ID</code>,{" "}
+                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_ID</code>, and{" "}
+                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_SECRET</code> in Secrets.
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Info banner */}
                       <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-700">
                         <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="none">
                           <path d="M3 16.5C3 18.43 4.57 20 6.5 20h11C19.43 20 21 18.43 21 16.5c0-1.64-1.11-3.02-2.63-3.42-.07-.33-.19-.63-.34-.91A5.5 5.5 0 0 0 7.08 11.1 3.5 3.5 0 0 0 3 14.5" fill="#0078D4" fillOpacity=".3"/>
                           <path d="M13.5 8C11.57 8 10 9.57 10 11.5v.08A5.5 5.5 0 0 1 18.03 13.08C18.82 13.58 19.42 14.35 19.74 15.26A3.5 3.5 0 0 0 17.5 8.5a3.4 3.4 0 0 0-4-.5z" fill="#0078D4"/>
                         </svg>
-                        Paste a OneDrive sharing link. You'll be prompted for product & model tags, then edit the entry to paste document content.
+                        Paste a OneDrive/SharePoint folder link, click Browse, then select which documents to import.
                       </div>
+
+                      {/* URL input */}
                       <div className="space-y-2">
-                        <Label>OneDrive Sharing URL</Label>
+                        <Label>OneDrive / SharePoint Folder URL</Label>
                         <div className="flex gap-2">
                           <Input
-                            placeholder="https://onedrive.live.com/..."
+                            placeholder="https://heroelectronix1-my.sharepoint.com/..."
                             value={odUrl}
                             data-testid="input-onedrive-url"
-                            onChange={e => { setOdUrl(e.target.value); setOdUrlStatus("idle"); }}
+                            onChange={e => { setOdUrl(e.target.value); setOdBrowseStatus("idle"); setOdBrowseError(""); }}
                             className="flex-1"
                           />
                           <Button
-                            onClick={handleOdUrlSubmit}
-                            disabled={!odUrl.trim() || odUrlStatus === "loading"}
-                            data-testid="button-onedrive-add"
+                            onClick={handleOdBrowse}
+                            disabled={!odUrl.trim() || odBrowseStatus === "browsing" || !(odStatus?.configured)}
+                            data-testid="button-onedrive-browse"
+                            variant="outline"
                           >
-                            {odUrlStatus === "loading" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Add"}
+                            {odBrowseStatus === "browsing"
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <><FolderOpen className="w-4 h-4 mr-1" />Browse</>
+                            }
                           </Button>
                         </div>
-                        {odUrlStatus === "success" && <p className="text-sm text-green-600">Link added to KB!</p>}
-                        {odUrlStatus === "error" && <p className="text-sm text-destructive">Failed to add link.</p>}
+                        {odBrowseError && (
+                          <p className="text-sm text-destructive flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3" />{odBrowseError}
+                          </p>
+                        )}
                       </div>
+
+                      {/* File list */}
+                      {odBrowseStatus === "done" && odFiles.length === 0 && (
+                        <p className="text-sm text-muted-foreground text-center py-4">No supported files found in this folder.</p>
+                      )}
+
+                      {odBrowseStatus === "done" && odFiles.length > 0 && (
+                        <div className="space-y-3 border rounded-lg p-3 bg-muted/30">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium">{odFiles.length} files found</p>
+                            <div className="flex gap-2 text-xs text-muted-foreground">
+                              <button
+                                className="underline hover:text-foreground"
+                                onClick={() => setOdSelected(new Set(odFiles.map(f => f.id)))}
+                              >Select all</button>
+                              <button
+                                className="underline hover:text-foreground"
+                                onClick={() => setOdSelected(new Set())}
+                              >Clear</button>
+                            </div>
+                          </div>
+
+                          <div className="max-h-48 overflow-y-auto space-y-1">
+                            {odFiles.map(file => (
+                              <label
+                                key={file.id}
+                                className="flex items-center gap-2 p-2 rounded-md hover:bg-muted cursor-pointer text-sm"
+                                data-testid={`checkbox-odfile-${file.id}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="rounded"
+                                  checked={odSelected.has(file.id)}
+                                  onChange={e => {
+                                    const next = new Set(odSelected);
+                                    if (e.target.checked) next.add(file.id);
+                                    else next.delete(file.id);
+                                    setOdSelected(next);
+                                  }}
+                                />
+                                <FileIcon className="w-4 h-4 text-muted-foreground shrink-0" />
+                                <span className="truncate flex-1">{file.name}</span>
+                                <span className="text-xs text-muted-foreground shrink-0">
+                                  {(file.size / 1024).toFixed(0)} KB
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+
+                          {/* Import tags */}
+                          <div className="border-t pt-3 space-y-3">
+                            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Tag imported files</p>
+                            <TagInput
+                              label="Product Categories"
+                              placeholder="e.g. Cam360"
+                              values={odImportTags.productCategories}
+                              onChange={v => setOdImportTags(t => ({ ...t, productCategories: v }))}
+                              testId="input-od-categories"
+                            />
+                            <TagInput
+                              label="Model Numbers"
+                              placeholder="e.g. HE-CAM360"
+                              values={odImportTags.modelNumbers}
+                              onChange={v => setOdImportTags(t => ({ ...t, modelNumbers: v }))}
+                              testId="input-od-models"
+                            />
+                          </div>
+
+                          {/* Import button */}
+                          <Button
+                            className="w-full"
+                            onClick={handleOdImportSelected}
+                            disabled={odSelected.size === 0 || odImportStatus === "importing"}
+                            data-testid="button-onedrive-import"
+                          >
+                            {odImportStatus === "importing" ? (
+                              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                Importing {odImportProgress.done}/{odImportProgress.total}…</>
+                            ) : odImportStatus === "done" ? (
+                              <><CheckCircle2 className="w-4 h-4 mr-2" />Imported!</>
+                            ) : (
+                              <><Download className="w-4 h-4 mr-2" />
+                                Import {odSelected.size || ""} selected file{odSelected.size !== 1 ? "s" : ""}</>
+                            )}
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   </TabsContent>
                 </Tabs>

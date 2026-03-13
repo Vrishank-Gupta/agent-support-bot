@@ -5,6 +5,12 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
 import { chatStorage } from "./storage";
+import {
+  msCredentialsConfigured,
+  parseOdUrl,
+  listFolder,
+  extractFileContent,
+} from "./onedrive";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -168,6 +174,63 @@ export function registerChatRoutes(app: Express): void {
   });
 
   // ══════════════════════════════════════════════════
+  // ONEDRIVE GRAPH API — BROWSE & IMPORT
+  // ══════════════════════════════════════════════════
+
+  // Check if MS credentials are configured
+  app.get("/api/onedrive/status", (req: Request, res: Response) => {
+    res.json({ configured: msCredentialsConfigured() });
+  });
+
+  // Browse a OneDrive folder URL — returns list of files
+  app.post("/api/onedrive/browse", async (req: Request, res: Response) => {
+    try {
+      if (!msCredentialsConfigured()) {
+        return res.status(503).json({ error: "Microsoft credentials not configured. Please set MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET in Secrets." });
+      }
+      const { url } = req.body;
+      if (!url) return res.status(400).json({ error: "URL required" });
+
+      const parsed = parseOdUrl(url);
+      const files = await listFolder(parsed);
+      res.json({ files, parsed: { upn: parsed.upn, drivePath: parsed.drivePath } });
+    } catch (err: any) {
+      console.error("OneDrive browse error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Import a specific file from OneDrive into the KB
+  app.post("/api/onedrive/import-file", async (req: Request, res: Response) => {
+    try {
+      if (!msCredentialsConfigured()) {
+        return res.status(503).json({ error: "Microsoft credentials not configured." });
+      }
+
+      const { fileItem, upn, productCategories, modelNumbers } = req.body;
+      if (!fileItem || !upn) return res.status(400).json({ error: "fileItem and upn required" });
+
+      const content = await extractFileContent(fileItem, upn);
+      if (!content.trim()) {
+        return res.status(422).json({ error: "Could not extract text from file." });
+      }
+
+      const kb = await chatStorage.createKB({
+        title: `OneDrive: ${fileItem.name}`,
+        content: content.trim(),
+        type: "onedrive",
+        productCategories: productCategories || [],
+        modelNumbers: modelNumbers || [],
+      });
+
+      res.status(201).json(kb);
+    } catch (err: any) {
+      console.error("OneDrive import error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════
   // FILE UPLOAD TO KB
   // ══════════════════════════════════════════════════
 
@@ -277,15 +340,55 @@ export function registerChatRoutes(app: Express): void {
 
       chatMessages.unshift({
         role: "system",
-        content: `You are an AI assistant designed to train and assist customer support agents handling escalations.
-Act as a human-like trainer. Guide the agent step-by-step to solve the customer's issue.
-Support both English and Hindi languages based on the agent's query.
+        content: `You are an internal support assistant for Hero Electronix. You help support agents resolve product issues quickly using the knowledge base.
+
+CORE RULES
+1. Always confirm product category, model number, and — where the doc requires it — firmware/software version BEFORE giving any steps.
+2. Collect all missing context in one single question. Never ask across multiple turns.
+3. Give short, numbered steps only. Max 5 steps. If more exist, summarize and link.
+4. End every answer with: Source: [doc title]
+5. If no KB doc matches, say: "No doc found. Please escalate."
+6. Never guess. Never use information outside the KB.
+7. Support both English and Hindi — respond in the same language the agent uses.
+
+TOKEN RULES
+- Do not restate the question.
+- Do not repeat the doc header in your reply.
+- Skip background context unless the agent asks.
+- If the same doc is referenced again in the conversation, cite by name only.
+
+KB DOCUMENT STRUCTURE
+Every doc has a structured header:
+  - Product Category
+  - Model No
+  - Issue
+  - Firmware Required: [version] OR "Not applicable"
+
+EXTRACTION FLOW
+Step 1 — Collect mandatory context
+  Check for: product category, model number.
+  Also check the matched doc's "Firmware Required" field.
+  If firmware version is required, include it in the same upfront question.
+  Ask everything in one message — never split across turns.
+
+Step 2 — Match the doc
+  Match using: Product Category + Model No + Issue keywords.
+  If firmware version is required and the agent's version doesn't meet minimum:
+  → "This fix requires firmware v[X]+. Agent must update firmware first. [Link]"
+
+Step 3 — Respond
+  - Return only steps relevant to the reported issue.
+  - Max 5 steps. If more exist: "Full steps in doc: [title]"
+  - End with: Source: [doc title]
+
+FIRMWARE SCAN RULE
+On every KB doc match:
+  - Check if "Firmware Required" ≠ "Not applicable"
+  - If yes → collect firmware version before building any response
+  - Do not begin troubleshooting until version is confirmed
 
 YOUR KNOWLEDGE BASE:
-${kbContext}
-
-IMPORTANT: When answering, you MUST mention which source from the knowledge base you are using. 
-Reference them as [Source: Title].`,
+${kbContext}`,
       });
 
       res.setHeader("Content-Type", "text/event-stream");
