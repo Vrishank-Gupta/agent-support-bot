@@ -4,7 +4,7 @@ import {
   conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage,
   type InsertKnowledgeBase, type InsertWhitelistedUser
 } from "@shared/schema";
-import { eq, desc, sum } from "drizzle-orm";
+import { eq, desc, isNull } from "drizzle-orm";
 
 export interface IChatStorage {
   getConversation(id: number): Promise<typeof conversations.$inferSelect | undefined>;
@@ -17,8 +17,10 @@ export interface IChatStorage {
   // Knowledge Base
   getKB(id: number): Promise<typeof knowledgeBase.$inferSelect | undefined>;
   getAllKB(): Promise<(typeof knowledgeBase.$inferSelect)[]>;
+  getKBsWithoutEmbedding(): Promise<(typeof knowledgeBase.$inferSelect)[]>;
   createKB(kb: InsertKnowledgeBase): Promise<typeof knowledgeBase.$inferSelect>;
   updateKB(id: number, kb: Partial<InsertKnowledgeBase>): Promise<typeof knowledgeBase.$inferSelect>;
+  updateKBEmbedding(id: number, embedding: number[]): Promise<void>;
   deleteKB(id: number): Promise<void>;
 
   // Whitelist
@@ -72,6 +74,10 @@ export const chatStorage: IChatStorage = {
     return db.select().from(knowledgeBase).orderBy(desc(knowledgeBase.updatedAt));
   },
 
+  async getKBsWithoutEmbedding() {
+    return db.select().from(knowledgeBase).where(isNull(knowledgeBase.embedding));
+  },
+
   async createKB(kb: InsertKnowledgeBase) {
     const [newKb] = await db.insert(knowledgeBase).values(kb).returning();
     return newKb;
@@ -80,6 +86,10 @@ export const chatStorage: IChatStorage = {
   async updateKB(id: number, kb: Partial<InsertKnowledgeBase>) {
     const [updated] = await db.update(knowledgeBase).set({ ...kb, updatedAt: new Date() }).where(eq(knowledgeBase.id, id)).returning();
     return updated;
+  },
+
+  async updateKBEmbedding(id: number, embedding: number[]) {
+    await db.update(knowledgeBase).set({ embedding }).where(eq(knowledgeBase.id, id));
   },
 
   async deleteKB(id: number) {

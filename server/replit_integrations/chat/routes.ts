@@ -19,6 +19,57 @@ const openai = new OpenAI({
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
+// ── Embedding helpers ──────────────────────────────────────────────────────
+
+/** Generate a 1536-dim embedding using text-embedding-3-small */
+async function generateEmbedding(text: string): Promise<number[]> {
+  const input = text.slice(0, 8000); // stay well within token limits
+  const res = await openai.embeddings.create({ model: "text-embedding-3-small", input });
+  return res.data[0].embedding;
+}
+
+/** Cosine similarity between two equal-length vectors */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0, magA = 0, magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+/** Generate embedding for a KB entry and persist it (fire-and-forget safe) */
+async function embedKB(id: number, title: string, content: string): Promise<void> {
+  try {
+    const embedding = await generateEmbedding(`${title}\n\n${content}`);
+    await chatStorage.updateKBEmbedding(id, embedding);
+  } catch (err: any) {
+    console.error(`[embed] failed for KB ${id}:`, err.message);
+  }
+}
+
+/** Find top-K most semantically similar KB entries to the query */
+async function searchKB(query: string, topK = 5): Promise<(typeof import("@shared/schema").knowledgeBase.$inferSelect)[]> {
+  const kbs = await chatStorage.getAllKB();
+  const withEmbeddings = kbs.filter(k => k.embedding && k.embedding.length > 0);
+
+  if (withEmbeddings.length === 0) {
+    // Fallback: return all if nothing is embedded yet
+    return kbs.slice(0, topK);
+  }
+
+  const queryEmbedding = await generateEmbedding(query);
+
+  const scored = withEmbeddings.map(k => ({
+    kb: k,
+    score: cosineSimilarity(queryEmbedding, k.embedding as number[]),
+  }));
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK).map(s => s.kb);
+}
+
 export function registerChatRoutes(app: Express): void {
 
   // ══════════════════════════════════════════════════
@@ -223,6 +274,7 @@ export function registerChatRoutes(app: Express): void {
         modelNumbers: modelNumbers || [],
       });
 
+      embedKB(kb.id, kb.title, kb.content); // async, fire-and-forget
       res.status(201).json(kb);
     } catch (err: any) {
       console.error("OneDrive import error:", err.message);
@@ -263,6 +315,7 @@ export function registerChatRoutes(app: Express): void {
       } catch {}
 
       const kb = await chatStorage.createKB({ title, content: content.trim(), type: "onedrive", productCategories, modelNumbers });
+      embedKB(kb.id, kb.title, kb.content); // async, fire-and-forget
       res.status(201).json(kb);
     } catch (error) {
       console.error("File upload error:", error);
@@ -286,6 +339,7 @@ export function registerChatRoutes(app: Express): void {
   app.post("/api/kb", async (req: Request, res: Response) => {
     try {
       const kb = await chatStorage.createKB(req.body);
+      embedKB(kb.id, kb.title, kb.content); // async, fire-and-forget
       res.status(201).json(kb);
     } catch (error) {
       res.status(500).json({ error: "Failed to create KB" });
@@ -296,9 +350,32 @@ export function registerChatRoutes(app: Express): void {
     try {
       const id = parseInt(req.params.id);
       const kb = await chatStorage.updateKB(id, req.body);
+      embedKB(kb.id, kb.title, kb.content); // re-embed on content change
       res.json(kb);
     } catch (error) {
       res.status(500).json({ error: "Failed to update KB" });
+    }
+  });
+
+  // Admin: reindex all KB entries (regenerate embeddings)
+  app.post("/api/kb/reindex", async (req: Request, res: Response) => {
+    const isAdmin = await requireAdmin(req, res);
+    if (!isAdmin) return;
+    try {
+      const all = await chatStorage.getAllKB();
+      res.json({ message: `Reindexing ${all.length} entries in background...` });
+      // Process in background after responding
+      (async () => {
+        let done = 0;
+        for (const kb of all) {
+          await embedKB(kb.id, kb.title, kb.content);
+          done++;
+          console.log(`[reindex] ${done}/${all.length} — ${kb.title}`);
+        }
+        console.log("[reindex] Complete");
+      })();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to start reindex" });
     }
   });
 
@@ -323,8 +400,9 @@ export function registerChatRoutes(app: Express): void {
 
       await chatStorage.createMessage(conversationId, "user", content);
 
-      const kbs = await chatStorage.getAllKB();
-      const kbContext = kbs.map(k => {
+      // Vector search: embed the query and retrieve the top-5 most relevant KB entries
+      const relevantKBs = await searchKB(content, 5);
+      const kbContext = relevantKBs.map(k => {
         const tags: string[] = [];
         if (k.productCategories?.length) tags.push(`Product: ${k.productCategories.join(", ")}`);
         if (k.modelNumbers?.length) tags.push(`Model: ${k.modelNumbers.join(", ")}`);
@@ -442,4 +520,20 @@ ${kbContext}`,
       }
     }
   });
+
+  // ── Startup: auto-embed any KB entries that are missing embeddings ────────
+  (async () => {
+    try {
+      await new Promise(r => setTimeout(r, 3000)); // wait for server to settle
+      const unindexed = await chatStorage.getKBsWithoutEmbedding();
+      if (unindexed.length === 0) return;
+      console.log(`[embed] Auto-indexing ${unindexed.length} KB entries without embeddings...`);
+      for (const kb of unindexed) {
+        await embedKB(kb.id, kb.title, kb.content);
+      }
+      console.log(`[embed] Auto-indexing complete.`);
+    } catch (e: any) {
+      console.error("[embed] Auto-index error:", e.message);
+    }
+  })();
 }

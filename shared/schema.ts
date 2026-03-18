@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -24,6 +24,7 @@ export const knowledgeBase = pgTable("knowledge_base", {
   type: text("type").notNull(), // 'onedrive', 'zoho_ticket', 'zoho_kb', 'manual'
   productCategories: text("product_categories").array().default([]).notNull(),
   modelNumbers: text("model_numbers").array().default([]).notNull(),
+  embedding: real("embedding").array(), // vector embedding for similarity search (text-embedding-3-small = 1536 dims)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

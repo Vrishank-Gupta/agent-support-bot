@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   ShieldCheck, Users, Plus, Trash2, Zap, BookOpen, TrendingUp,
-  AlertCircle, X, Edit2, Save, Coins
+  AlertCircle, X, Edit2, Save, Coins, RefreshCw, CheckCircle2, Database
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { WhitelistedUser } from "@shared/schema";
@@ -147,6 +147,22 @@ export function AdminPanel() {
     },
   });
 
+  // Reindex KB embeddings mutation
+  const [reindexStatus, setReindexStatus] = useState<"idle" | "running" | "done">("idle");
+  const reindex = async () => {
+    setReindexStatus("running");
+    try {
+      const res = await fetch("/api/kb/reindex", { method: "POST", headers: authHeaders });
+      if (!res.ok) throw new Error("Failed to start reindex");
+      toast({ title: "Reindex started", description: "KB embeddings are being regenerated in the background." });
+      setReindexStatus("done");
+      setTimeout(() => setReindexStatus("idle"), 5000);
+    } catch {
+      toast({ title: "Reindex failed", variant: "destructive" });
+      setReindexStatus("idle");
+    }
+  };
+
   const roleBadge = (role: string) => (
     <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
       role === "admin" ? "bg-violet-100 text-violet-700 border-violet-200" : "bg-sky-100 text-sky-700 border-sky-200"
@@ -217,6 +233,38 @@ export function AdminPanel() {
                 </div>
               </div>
             )}
+          </section>
+
+          {/* KB Vector Index */}
+          <section>
+            <h2 className="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
+              <Database className="w-4 h-4 text-muted-foreground" /> Knowledge Base — Vector Index
+            </h2>
+            <Card>
+              <CardContent className="pt-6 pb-5 flex items-start justify-between gap-6">
+                <div>
+                  <p className="text-sm font-medium">Reindex All KB Entries</p>
+                  <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+                    Regenerates the vector embeddings for every KB document. Run this after bulk-importing files or if search results seem inaccurate. The process runs in the background and may take a minute.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={reindex}
+                  disabled={reindexStatus === "running"}
+                  data-testid="button-reindex-kb"
+                  className="shrink-0"
+                >
+                  {reindexStatus === "running" ? (
+                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" />Reindexing…</>
+                  ) : reindexStatus === "done" ? (
+                    <><CheckCircle2 className="w-4 h-4 mr-2 text-green-600" />Done</>
+                  ) : (
+                    <><RefreshCw className="w-4 h-4 mr-2" />Reindex KB</>
+                  )}
+                </Button>
+              </CardContent>
+            </Card>
           </section>
 
           {/* User Whitelist */}
