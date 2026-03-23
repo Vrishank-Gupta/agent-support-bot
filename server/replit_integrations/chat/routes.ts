@@ -10,6 +10,11 @@ import {
   parseOdUrl,
   listFolder,
   extractFileContent,
+  isSharingLink,
+  isSharingLinkFolder,
+  listSharedFolder,
+  getSharedItemMeta,
+  extractSharedFileContent,
 } from "./onedrive";
 
 const openai = new OpenAI({
@@ -278,6 +283,87 @@ export function registerChatRoutes(app: Express): void {
       res.status(201).json(kb);
     } catch (err: any) {
       console.error("OneDrive import error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── "Anyone" sharing link routes (no Azure credentials needed) ──────────────
+
+  // Detect what kind of URL was pasted and return routing info
+  app.post("/api/onedrive/detect", (req: Request, res: Response) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: "URL required" });
+    if (isSharingLink(url)) {
+      res.json({ type: isSharingLinkFolder(url) ? "sharing-folder" : "sharing-file" });
+    } else {
+      res.json({ type: "folder-url" }); // original flow (needs credentials)
+    }
+  });
+
+  // Browse a publicly shared folder — no credentials
+  app.post("/api/onedrive/browse-shared", async (req: Request, res: Response) => {
+    try {
+      const { url } = req.body;
+      if (!url) return res.status(400).json({ error: "URL required" });
+      if (!isSharingLinkFolder(url)) return res.status(400).json({ error: "URL must be a shared folder link (/:f:/)" });
+      const files = await listSharedFolder(url);
+      res.json({ files });
+    } catch (err: any) {
+      console.error("Shared folder browse error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Import a single publicly shared file — no credentials
+  app.post("/api/onedrive/import-shared-file", async (req: Request, res: Response) => {
+    try {
+      const { url, productCategories, modelNumbers } = req.body;
+      if (!url) return res.status(400).json({ error: "URL required" });
+
+      // Get file metadata first (name, etc.)
+      const meta = await getSharedItemMeta(url);
+      if (meta.isFolder) return res.status(400).json({ error: "URL points to a folder. Use the folder browsing flow." });
+
+      const content = await extractSharedFileContent(meta);
+      if (!content.trim()) return res.status(422).json({ error: "Could not extract text from file." });
+
+      const kb = await chatStorage.createKB({
+        title: `OneDrive: ${meta.name}`,
+        content: content.trim(),
+        type: "onedrive",
+        productCategories: productCategories || [],
+        modelNumbers: modelNumbers || [],
+      });
+
+      embedKB(kb.id, kb.title, kb.content); // async
+      res.status(201).json(kb);
+    } catch (err: any) {
+      console.error("Shared file import error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Import selected files from a publicly shared folder — no credentials
+  app.post("/api/onedrive/import-shared-folder-file", async (req: Request, res: Response) => {
+    try {
+      const { fileItem, productCategories, modelNumbers } = req.body;
+      if (!fileItem) return res.status(400).json({ error: "fileItem required" });
+
+      const content = await extractSharedFileContent(fileItem);
+      if (!content.trim()) return res.status(422).json({ error: "Could not extract text from file." });
+
+      const kb = await chatStorage.createKB({
+        title: `OneDrive: ${fileItem.name}`,
+        content: content.trim(),
+        type: "onedrive",
+        productCategories: productCategories || [],
+        modelNumbers: modelNumbers || [],
+      });
+
+      embedKB(kb.id, kb.title, kb.content); // async
+      res.status(201).json(kb);
+    } catch (err: any) {
+      console.error("Shared folder file import error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });

@@ -134,6 +134,9 @@ export function KBManager() {
   const [odImportTags, setOdImportTags] = useState({ productCategories: [] as string[], modelNumbers: [] as string[] });
   const [odImportStatus, setOdImportStatus] = useState<"idle" | "importing" | "done">("idle");
   const [odImportProgress, setOdImportProgress] = useState({ done: 0, total: 0 });
+  // URL type detection: "sharing-file" | "sharing-folder" | "folder-url" | "unknown"
+  const [odUrlType, setOdUrlType] = useState<"sharing-file" | "sharing-folder" | "folder-url" | "unknown">("unknown");
+  const [odSingleImportStatus, setOdSingleImportStatus] = useState<"idle" | "importing" | "done" | "error">("idle");
   // Check if MS credentials are configured
   const { data: odStatus } = useQuery<{ configured: boolean }>({ queryKey: ["/api/onedrive/status"] });
 
@@ -253,6 +256,43 @@ export function KBManager() {
     }
   };
 
+  // Detect URL type when URL changes
+  const detectUrlType = async (url: string) => {
+    if (!url.trim()) { setOdUrlType("unknown"); return; }
+    try {
+      const res = await apiRequest("POST", "/api/onedrive/detect", { url }) as { type: string };
+      setOdUrlType(res.type as any);
+    } catch {
+      setOdUrlType("unknown");
+    }
+  };
+
+  // Import a single publicly shared file (no credentials)
+  const handleOdImportSingleFile = async () => {
+    if (!odUrl.trim()) return;
+    setOdSingleImportStatus("importing");
+    try {
+      await apiRequest("POST", "/api/onedrive/import-shared-file", {
+        url: odUrl,
+        productCategories: odImportTags.productCategories,
+        modelNumbers: odImportTags.modelNumbers,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
+      setOdSingleImportStatus("done");
+      toast({ title: "File imported from OneDrive!" });
+      setTimeout(() => {
+        setOdSingleImportStatus("idle");
+        setOdUrl("");
+        setOdUrlType("unknown");
+        setOdImportTags({ productCategories: [], modelNumbers: [] });
+      }, 2000);
+    } catch (err: any) {
+      setOdSingleImportStatus("error");
+      toast({ title: "Import failed", description: err?.message, variant: "destructive" });
+      setTimeout(() => setOdSingleImportStatus("idle"), 3000);
+    }
+  };
+
   // New: browse a folder URL via Graph API
   const handleOdBrowse = async () => {
     if (!odUrl.trim()) return;
@@ -261,10 +301,17 @@ export function KBManager() {
     setOdFiles([]);
     setOdSelected(new Set());
     try {
-      const res = await apiRequest("POST", "/api/onedrive/browse", { url: odUrl });
-      const data = res as { files: OdFileItem[]; parsed: { upn: string; drivePath: string } };
-      setOdFiles(data.files.filter(f => !f.isFolder)); // only files for now
-      setOdUpn(data.parsed.upn);
+      // Route to the right endpoint based on URL type
+      let data: { files: OdFileItem[] };
+      if (odUrlType === "sharing-folder") {
+        const res = await apiRequest("POST", "/api/onedrive/browse-shared", { url: odUrl });
+        data = res as { files: OdFileItem[] };
+      } else {
+        const res = await apiRequest("POST", "/api/onedrive/browse", { url: odUrl });
+        data = res as { files: OdFileItem[]; parsed: { upn: string; drivePath: string } };
+        setOdUpn((res as any).parsed?.upn || "");
+      }
+      setOdFiles((data.files || []).filter(f => !f.isFolder));
       setOdBrowseStatus("done");
     } catch (err: any) {
       setOdBrowseError(err?.message || "Failed to browse folder");
@@ -279,15 +326,18 @@ export function KBManager() {
     setOdImportStatus("importing");
     setOdImportProgress({ done: 0, total: selected.length });
 
+    const isSharedFolder = odUrlType === "sharing-folder";
+
     let done = 0;
     for (const file of selected) {
       try {
-        await apiRequest("POST", "/api/onedrive/import-file", {
-          fileItem: file,
-          upn: odUpn,
-          productCategories: odImportTags.productCategories,
-          modelNumbers: odImportTags.modelNumbers,
-        });
+        const endpoint = isSharedFolder
+          ? "/api/onedrive/import-shared-folder-file"
+          : "/api/onedrive/import-file";
+        const body = isSharedFolder
+          ? { fileItem: file, productCategories: odImportTags.productCategories, modelNumbers: odImportTags.modelNumbers }
+          : { fileItem: file, upn: odUpn, productCategories: odImportTags.productCategories, modelNumbers: odImportTags.modelNumbers };
+        await apiRequest("POST", endpoint, body);
         done++;
         setOdImportProgress({ done, total: selected.length });
       } catch (err: any) {
@@ -419,143 +469,190 @@ export function KBManager() {
                   {/* OneDrive URL tab */}
                   <TabsContent value="url" className="space-y-4">
                     <div className="space-y-3">
-                      {/* Credentials warning */}
-                      {odStatus && !odStatus.configured && (
-                        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">
-                          <Settings2 className="w-4 h-4 shrink-0 mt-0.5" />
-                          <span>
-                            Microsoft credentials are not configured. Ask your admin to set{" "}
-                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_TENANT_ID</code>,{" "}
-                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_ID</code>, and{" "}
-                            <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_SECRET</code> in Secrets.
-                          </span>
-                        </div>
-                      )}
 
                       {/* Info banner */}
-                      <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-700">
-                        <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="none">
+                      <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-700">
+                        <svg className="w-5 h-5 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none">
                           <path d="M3 16.5C3 18.43 4.57 20 6.5 20h11C19.43 20 21 18.43 21 16.5c0-1.64-1.11-3.02-2.63-3.42-.07-.33-.19-.63-.34-.91A5.5 5.5 0 0 0 7.08 11.1 3.5 3.5 0 0 0 3 14.5" fill="#0078D4" fillOpacity=".3"/>
                           <path d="M13.5 8C11.57 8 10 9.57 10 11.5v.08A5.5 5.5 0 0 1 18.03 13.08C18.82 13.58 19.42 14.35 19.74 15.26A3.5 3.5 0 0 0 17.5 8.5a3.4 3.4 0 0 0-4-.5z" fill="#0078D4"/>
                         </svg>
-                        Paste a OneDrive/SharePoint folder link, click Browse, then select which documents to import.
+                        <div>
+                          Paste a OneDrive/SharePoint link. The system auto-detects the type.{" "}
+                          <span className="font-medium">For zero-credential access</span>, set your file or folder to{" "}
+                          <span className="font-medium">"Anyone – doesn't require sign-in"</span> before copying the link.
+                        </div>
                       </div>
 
                       {/* URL input */}
                       <div className="space-y-2">
-                        <Label>OneDrive / SharePoint Folder URL</Label>
-                        <div className="flex gap-2">
-                          <Input
-                            placeholder="https://heroelectronix1-my.sharepoint.com/..."
-                            value={odUrl}
-                            data-testid="input-onedrive-url"
-                            onChange={e => { setOdUrl(e.target.value); setOdBrowseStatus("idle"); setOdBrowseError(""); }}
-                            className="flex-1"
-                          />
-                          <Button
-                            onClick={handleOdBrowse}
-                            disabled={!odUrl.trim() || odBrowseStatus === "browsing" || !(odStatus?.configured)}
-                            data-testid="button-onedrive-browse"
-                            variant="outline"
-                          >
-                            {odBrowseStatus === "browsing"
-                              ? <Loader2 className="w-4 h-4 animate-spin" />
-                              : <><FolderOpen className="w-4 h-4 mr-1" />Browse</>
-                            }
-                          </Button>
-                        </div>
-                        {odBrowseError && (
-                          <p className="text-sm text-destructive flex items-center gap-1">
-                            <AlertCircle className="w-3 h-3" />{odBrowseError}
-                          </p>
+                        <Label>OneDrive / SharePoint URL</Label>
+                        <Input
+                          placeholder="Paste sharing link or folder URL…"
+                          value={odUrl}
+                          data-testid="input-onedrive-url"
+                          onChange={e => {
+                            const v = e.target.value;
+                            setOdUrl(v);
+                            setOdBrowseStatus("idle");
+                            setOdBrowseError("");
+                            setOdSingleImportStatus("idle");
+                            setOdFiles([]);
+                            setOdSelected(new Set());
+                            detectUrlType(v);
+                          }}
+                        />
+
+                        {/* URL type badge */}
+                        {odUrl.trim() && odUrlType !== "unknown" && (
+                          <div className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full w-fit ${
+                            odUrlType === "sharing-file"   ? "bg-green-100 text-green-700" :
+                            odUrlType === "sharing-folder" ? "bg-green-100 text-green-700" :
+                                                             "bg-amber-100 text-amber-700"
+                          }`}>
+                            {odUrlType === "sharing-file"   && <><CheckCircle2 className="w-3 h-3" /> Public sharing link – single file (no credentials needed)</>}
+                            {odUrlType === "sharing-folder" && <><CheckCircle2 className="w-3 h-3" /> Public sharing link – folder (no credentials needed)</>}
+                            {odUrlType === "folder-url"     && <><Settings2 className="w-3 h-3" /> Internal folder URL (Azure credentials required)</>}
+                          </div>
                         )}
                       </div>
 
-                      {/* File list */}
-                      {odBrowseStatus === "done" && odFiles.length === 0 && (
-                        <p className="text-sm text-muted-foreground text-center py-4">No supported files found in this folder.</p>
-                      )}
-
-                      {odBrowseStatus === "done" && odFiles.length > 0 && (
-                        <div className="space-y-3 border rounded-lg p-3 bg-muted/30">
-                          <div className="flex items-center justify-between">
-                            <p className="text-sm font-medium">{odFiles.length} files found</p>
-                            <div className="flex gap-2 text-xs text-muted-foreground">
-                              <button
-                                className="underline hover:text-foreground"
-                                onClick={() => setOdSelected(new Set(odFiles.map(f => f.id)))}
-                              >Select all</button>
-                              <button
-                                className="underline hover:text-foreground"
-                                onClick={() => setOdSelected(new Set())}
-                              >Clear</button>
-                            </div>
-                          </div>
-
-                          <div className="max-h-48 overflow-y-auto space-y-1">
-                            {odFiles.map(file => (
-                              <label
-                                key={file.id}
-                                className="flex items-center gap-2 p-2 rounded-md hover:bg-muted cursor-pointer text-sm"
-                                data-testid={`checkbox-odfile-${file.id}`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  className="rounded"
-                                  checked={odSelected.has(file.id)}
-                                  onChange={e => {
-                                    const next = new Set(odSelected);
-                                    if (e.target.checked) next.add(file.id);
-                                    else next.delete(file.id);
-                                    setOdSelected(next);
-                                  }}
-                                />
-                                <FileIcon className="w-4 h-4 text-muted-foreground shrink-0" />
-                                <span className="truncate flex-1">{file.name}</span>
-                                <span className="text-xs text-muted-foreground shrink-0">
-                                  {(file.size / 1024).toFixed(0)} KB
-                                </span>
-                              </label>
-                            ))}
-                          </div>
-
-                          {/* Import tags */}
-                          <div className="border-t pt-3 space-y-3">
-                            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Tag imported files</p>
-                            <TagInput
-                              label="Product Categories"
-                              placeholder="e.g. Cam360"
-                              values={odImportTags.productCategories}
-                              onChange={v => setOdImportTags(t => ({ ...t, productCategories: v }))}
-                              testId="input-od-categories"
-                            />
-                            <TagInput
-                              label="Model Numbers"
-                              placeholder="e.g. HE-CAM360"
-                              values={odImportTags.modelNumbers}
-                              onChange={v => setOdImportTags(t => ({ ...t, modelNumbers: v }))}
-                              testId="input-od-models"
-                            />
-                          </div>
-
-                          {/* Import button */}
+                      {/* ── CASE 1: Single publicly shared file ── */}
+                      {odUrlType === "sharing-file" && (
+                        <div className="border rounded-lg p-3 bg-muted/30 space-y-3">
+                          <p className="text-sm font-medium">Tag & Import</p>
+                          <TagInput
+                            label="Product Categories"
+                            placeholder="e.g. Cam360"
+                            values={odImportTags.productCategories}
+                            onChange={v => setOdImportTags(t => ({ ...t, productCategories: v }))}
+                            testId="input-od-categories"
+                          />
+                          <TagInput
+                            label="Model Numbers"
+                            placeholder="e.g. HE-CAM360"
+                            values={odImportTags.modelNumbers}
+                            onChange={v => setOdImportTags(t => ({ ...t, modelNumbers: v }))}
+                            testId="input-od-models"
+                          />
                           <Button
                             className="w-full"
-                            onClick={handleOdImportSelected}
-                            disabled={odSelected.size === 0 || odImportStatus === "importing"}
-                            data-testid="button-onedrive-import"
+                            onClick={handleOdImportSingleFile}
+                            disabled={odSingleImportStatus === "importing"}
+                            data-testid="button-onedrive-import-single"
                           >
-                            {odImportStatus === "importing" ? (
-                              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Importing {odImportProgress.done}/{odImportProgress.total}…</>
-                            ) : odImportStatus === "done" ? (
+                            {odSingleImportStatus === "importing" ? (
+                              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Downloading & importing…</>
+                            ) : odSingleImportStatus === "done" ? (
                               <><CheckCircle2 className="w-4 h-4 mr-2" />Imported!</>
                             ) : (
-                              <><Download className="w-4 h-4 mr-2" />
-                                Import {odSelected.size || ""} selected file{odSelected.size !== 1 ? "s" : ""}</>
+                              <><Download className="w-4 h-4 mr-2" />Import file</>
                             )}
                           </Button>
+                          {odSingleImportStatus === "error" && (
+                            <p className="text-xs text-destructive text-center">
+                              Import failed. Make sure the link is set to "Anyone – doesn't require sign-in".
+                            </p>
+                          )}
                         </div>
+                      )}
+
+                      {/* ── CASE 2 & 3: Folder (shared or credentialed) ── */}
+                      {(odUrlType === "sharing-folder" || odUrlType === "folder-url") && (
+                        <>
+                          {/* Credentials warning for internal URLs */}
+                          {odUrlType === "folder-url" && odStatus && !odStatus.configured && (
+                            <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">
+                              <Settings2 className="w-4 h-4 shrink-0 mt-0.5" />
+                              <span>
+                                This is an internal folder URL. Azure credentials are required:{" "}
+                                <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_TENANT_ID</code>,{" "}
+                                <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_ID</code>,{" "}
+                                <code className="font-mono text-xs bg-amber-100 px-1 rounded">MS_CLIENT_SECRET</code>.
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="flex gap-2">
+                            <Button
+                              className="flex-1"
+                              onClick={handleOdBrowse}
+                              disabled={
+                                odBrowseStatus === "browsing" ||
+                                (odUrlType === "folder-url" && !odStatus?.configured)
+                              }
+                              data-testid="button-onedrive-browse"
+                              variant="outline"
+                            >
+                              {odBrowseStatus === "browsing"
+                                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Loading files…</>
+                                : <><FolderOpen className="w-4 h-4 mr-2" />Browse folder</>
+                              }
+                            </Button>
+                          </div>
+
+                          {odBrowseError && (
+                            <p className="text-sm text-destructive flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" />{odBrowseError}
+                            </p>
+                          )}
+
+                          {odBrowseStatus === "done" && odFiles.length === 0 && (
+                            <p className="text-sm text-muted-foreground text-center py-4">No supported files found.</p>
+                          )}
+
+                          {odBrowseStatus === "done" && odFiles.length > 0 && (
+                            <div className="space-y-3 border rounded-lg p-3 bg-muted/30">
+                              <div className="flex items-center justify-between">
+                                <p className="text-sm font-medium">{odFiles.length} files found</p>
+                                <div className="flex gap-2 text-xs text-muted-foreground">
+                                  <button className="underline hover:text-foreground" onClick={() => setOdSelected(new Set(odFiles.map(f => f.id)))}>Select all</button>
+                                  <button className="underline hover:text-foreground" onClick={() => setOdSelected(new Set())}>Clear</button>
+                                </div>
+                              </div>
+
+                              <div className="max-h-48 overflow-y-auto space-y-1">
+                                {odFiles.map(file => (
+                                  <label key={file.id} className="flex items-center gap-2 p-2 rounded-md hover:bg-muted cursor-pointer text-sm" data-testid={`checkbox-odfile-${file.id}`}>
+                                    <input
+                                      type="checkbox"
+                                      className="rounded"
+                                      checked={odSelected.has(file.id)}
+                                      onChange={e => {
+                                        const next = new Set(odSelected);
+                                        if (e.target.checked) next.add(file.id); else next.delete(file.id);
+                                        setOdSelected(next);
+                                      }}
+                                    />
+                                    <FileIcon className="w-4 h-4 text-muted-foreground shrink-0" />
+                                    <span className="truncate flex-1">{file.name}</span>
+                                    <span className="text-xs text-muted-foreground shrink-0">{(file.size / 1024).toFixed(0)} KB</span>
+                                  </label>
+                                ))}
+                              </div>
+
+                              <div className="border-t pt-3 space-y-3">
+                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Tag imported files</p>
+                                <TagInput label="Product Categories" placeholder="e.g. Cam360" values={odImportTags.productCategories} onChange={v => setOdImportTags(t => ({ ...t, productCategories: v }))} testId="input-od-categories" />
+                                <TagInput label="Model Numbers" placeholder="e.g. HE-CAM360" values={odImportTags.modelNumbers} onChange={v => setOdImportTags(t => ({ ...t, modelNumbers: v }))} testId="input-od-models" />
+                              </div>
+
+                              <Button
+                                className="w-full"
+                                onClick={handleOdImportSelected}
+                                disabled={odSelected.size === 0 || odImportStatus === "importing"}
+                                data-testid="button-onedrive-import"
+                              >
+                                {odImportStatus === "importing" ? (
+                                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing {odImportProgress.done}/{odImportProgress.total}…</>
+                                ) : odImportStatus === "done" ? (
+                                  <><CheckCircle2 className="w-4 h-4 mr-2" />Imported!</>
+                                ) : (
+                                  <><Download className="w-4 h-4 mr-2" />Import {odSelected.size || ""} selected file{odSelected.size !== 1 ? "s" : ""}</>
+                                )}
+                              </Button>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   </TabsContent>
