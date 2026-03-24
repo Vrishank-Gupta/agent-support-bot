@@ -25,6 +25,7 @@ export const knowledgeBase = pgTable("knowledge_base", {
   productCategories: text("product_categories").array().default([]).notNull(),
   modelNumbers: text("model_numbers").array().default([]).notNull(),
   embedding: real("embedding").array(), // vector embedding for similarity search (text-embedding-3-small = 1536 dims)
+  sourceUrl: text("source_url"), // original OneDrive/SharePoint URL for refresh
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

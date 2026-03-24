@@ -277,6 +277,7 @@ export function registerChatRoutes(app: Express): void {
         type: "onedrive",
         productCategories: productCategories || [],
         modelNumbers: modelNumbers || [],
+        sourceUrl: fileItem.webUrl || null,
       });
 
       embedKB(kb.id, kb.title, kb.content); // async, fire-and-forget
@@ -333,6 +334,7 @@ export function registerChatRoutes(app: Express): void {
         type: "onedrive",
         productCategories: productCategories || [],
         modelNumbers: modelNumbers || [],
+        sourceUrl: url,
       });
 
       embedKB(kb.id, kb.title, kb.content); // async
@@ -346,11 +348,14 @@ export function registerChatRoutes(app: Express): void {
   // Import selected files from a publicly shared folder — no credentials
   app.post("/api/onedrive/import-shared-folder-file", async (req: Request, res: Response) => {
     try {
-      const { fileItem, productCategories, modelNumbers } = req.body;
+      const { fileItem, productCategories, modelNumbers, folderUrl } = req.body;
       if (!fileItem) return res.status(400).json({ error: "fileItem required" });
 
       const content = await extractSharedFileContent(fileItem);
       if (!content.trim()) return res.status(422).json({ error: "Could not extract text from file." });
+
+      // sourceUrl: prefer the folder sharing URL (re-browsable), fall back to file webUrl
+      const sourceUrl = folderUrl || fileItem.sharingUrl || fileItem.webUrl || null;
 
       const kb = await chatStorage.createKB({
         title: `OneDrive: ${fileItem.name}`,
@@ -358,6 +363,7 @@ export function registerChatRoutes(app: Express): void {
         type: "onedrive",
         productCategories: productCategories || [],
         modelNumbers: modelNumbers || [],
+        sourceUrl,
       });
 
       embedKB(kb.id, kb.title, kb.content); // async
@@ -472,6 +478,43 @@ export function registerChatRoutes(app: Express): void {
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: "Failed to delete KB" });
+    }
+  });
+
+  // Refresh a KB entry from its original OneDrive source URL
+  app.post("/api/kb/:id/refresh", async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const kb = await chatStorage.getKB(id);
+      if (!kb) return res.status(404).json({ error: "KB entry not found" });
+      if (!kb.sourceUrl) return res.status(400).json({ error: "No source URL stored for this entry. Only OneDrive-imported entries can be refreshed." });
+
+      const sourceUrl = kb.sourceUrl;
+      let newContent = "";
+
+      if (isSharingLink(sourceUrl) && !isSharingLinkFolder(sourceUrl)) {
+        // Single "Anyone" shared file — re-download directly
+        const meta = await getSharedItemMeta(sourceUrl);
+        newContent = await extractSharedFileContent(meta);
+      } else if (isSharingLink(sourceUrl) && isSharingLinkFolder(sourceUrl)) {
+        // File was imported from a shared folder — re-list folder and find by filename
+        const fileName = kb.title.replace(/^OneDrive:\s*/i, "").trim();
+        const files = await listSharedFolder(sourceUrl);
+        const match = files.find(f => f.name === fileName);
+        if (!match) return res.status(404).json({ error: `File "${fileName}" not found in shared folder. It may have been renamed or moved.` });
+        newContent = await extractSharedFileContent(match);
+      } else {
+        return res.status(400).json({ error: "This entry was imported via Azure credentials. Manual refresh is not supported yet — please re-import from the OneDrive tab." });
+      }
+
+      if (!newContent.trim()) return res.status(422).json({ error: "Could not extract text from the file." });
+
+      const updated = await chatStorage.updateKB(id, { content: newContent.trim() });
+      embedKB(id, updated.title, updated.content); // re-embed async
+      res.json({ ...updated, refreshed: true });
+    } catch (err: any) {
+      console.error("KB refresh error:", err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 

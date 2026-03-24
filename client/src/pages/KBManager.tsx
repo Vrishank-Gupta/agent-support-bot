@@ -12,7 +12,7 @@ import { Sidebar } from "@/components/Sidebar";
 import {
   Plus, Trash2, Edit2, Save, X, Upload, FileText, Cloud,
   CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag, Link2, Lock,
-  Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2
+  Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2, RotateCcw
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/lib/userContext";
@@ -170,6 +170,21 @@ export function KBManager() {
       toast({ title: "Source deleted" });
     }
   });
+
+  const [refreshingId, setRefreshingId] = useState<number | null>(null);
+
+  const handleRefreshKB = async (id: number) => {
+    setRefreshingId(id);
+    try {
+      await apiRequest("POST", `/api/kb/${id}/refresh`, {});
+      await queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
+      toast({ title: "KB entry refreshed", description: "Content has been pulled fresh from OneDrive." });
+    } catch (err: any) {
+      toast({ title: "Refresh failed", description: err?.message || "Could not refresh this entry.", variant: "destructive" });
+    } finally {
+      setRefreshingId(null);
+    }
+  };
 
   /* file upload with tags */
   const executeUpload = async (pending: PendingFile) => {
@@ -335,7 +350,7 @@ export function KBManager() {
           ? "/api/onedrive/import-shared-folder-file"
           : "/api/onedrive/import-file";
         const body = isSharedFolder
-          ? { fileItem: file, productCategories: odImportTags.productCategories, modelNumbers: odImportTags.modelNumbers }
+          ? { fileItem: file, productCategories: odImportTags.productCategories, modelNumbers: odImportTags.modelNumbers, folderUrl: odUrl }
           : { fileItem: file, upn: odUpn, productCategories: odImportTags.productCategories, modelNumbers: odImportTags.modelNumbers };
         await apiRequest("POST", endpoint, body);
         done++;
@@ -823,6 +838,22 @@ export function KBManager() {
                           <>
                             {canAddKB && (
                               <>
+                                {kb.sourceUrl && (
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                                    title="Refresh content from OneDrive"
+                                    data-testid={`button-refresh-kb-${kb.id}`}
+                                    disabled={refreshingId === kb.id}
+                                    onClick={() => handleRefreshKB(kb.id)}
+                                  >
+                                    {refreshingId === kb.id
+                                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                                      : <RotateCcw className="w-4 h-4" />
+                                    }
+                                  </Button>
+                                )}
                                 <Button size="icon" variant="ghost" data-testid={`button-edit-kb-${kb.id}`} onClick={() => {
                                   setIsEditing(kb.id);
                                   setEditForm({
@@ -868,8 +899,15 @@ export function KBManager() {
                       )}
                     </CardContent>
 
-                    <CardFooter className="pt-0 text-[11px] text-muted-foreground">
-                      Last updated {new Date(kb.updatedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    <CardFooter className="pt-0 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-muted-foreground">
+                        Last updated {new Date(kb.updatedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                      {kb.sourceUrl && (
+                        <span className="flex items-center gap-1 text-[10px] font-medium text-blue-600 bg-blue-50 border border-blue-100 rounded-full px-2 py-0.5">
+                          <RotateCcw className="w-2.5 h-2.5" /> Auto-refreshable from OneDrive
+                        </span>
+                      )}
                     </CardFooter>
                   </Card>
                 );
