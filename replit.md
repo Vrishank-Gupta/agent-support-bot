@@ -57,11 +57,14 @@ A chat-based AI bot for customer support agents and escalation staff. Supports E
 - `DATABASE_URL` — PostgreSQL connection string
 - `SESSION_SECRET` — Express session secret
 
-## OneDrive Integration (NOT YET CONNECTED)
-- The Microsoft OneDrive connector exists (`ccfg_onedrive_01K4E4CFAKZ9ARQZBWZW4HD05Y`) but the user dismissed the OAuth flow.
-- To connect OneDrive: run `proposeIntegration("connector:ccfg_onedrive_01K4E4CFAKZ9ARQZBWZW4HD05Y")` and have the user complete the OAuth authorization.
-- Currently, file import works via local file upload (PDF, TXT, MD up to 20 MB).
-- The "Connect OneDrive" button in the KB Manager is shown as "Coming Soon" until OAuth is authorized.
+## SharePoint Integration (FedAuth — No Credentials Required)
+- Uses "Anyone with the link" SharePoint sharing URLs to access files without Azure App Registration.
+- On the first visit to a sharing URL, the server captures the `FedAuth` session cookie from the SharePoint redirect response.
+- That cookie is then used with the SharePoint REST API (`_api/web/GetFolderByServerRelativePath/Files`) to list and download files.
+- Hero Electronix SharePoint tenant: `heroelectronix1-my.sharepoint.com`
+- Cam360 folder (45 files) fully imported — 44 KB entries in the database (1 Excel skipped).
+- KB Manager → "Import from SharePoint" tab lets users paste a sharing link, browse files, and import selected ones.
+- Each KB card has a Refresh (↺) button that re-downloads from SharePoint and re-generates the entry.
 
 ## KB Tagging
 Every KB entry has two multi-value tag fields:

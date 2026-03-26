@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "Ph-5hRcSOtoZq38BgUv4q"
+uri = "file://replit.md"
+type = "text"
+title = "Customer Support AI Bot — Project Documentation"
