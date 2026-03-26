@@ -263,74 +263,131 @@ export interface SharingLinkItem {
   isFolder: boolean;
   size: number;
   webUrl: string;
-  shareId: string;  // encoded share ID for this specific item's parent
-  sharingUrl: string; // the original "Anyone" URL used to access this item
+  serverRelativeUrl?: string; // SharePoint server-relative path for direct download
+  fedAuthCookie?: string;     // FedAuth cookie for authenticated downloads
+  shareId: string;
+  sharingUrl: string;
 }
 
-/** Fetch metadata of a shared item via the /shares endpoint (no credentials needed for "Anyone" links) */
-async function sharesGet(shareId: string, path = ""): Promise<any> {
-  const url = `${GRAPH_BASE}/shares/${shareId}/driveItem${path}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Graph shares error (${res.status}): ${body}`);
-  }
-  return res.json();
+// ── FedAuth cookie-based access (works for "Anyone with the link" SharePoint folders) ──
+
+/** Extract the SharePoint site base URL (scheme + hostname) from a sharing URL */
+function siteBaseFromSharingUrl(sharingUrl: string): string {
+  const u = new URL(sharingUrl);
+  return `${u.protocol}//${u.hostname}`;
 }
 
-/** List files inside a shared folder (must be an "Anyone" folder link) */
+/**
+ * Single-trip helper: visits the sharing URL with redirect:manual,
+ * returns the FedAuth cookie AND the redirect location together.
+ */
+async function fetchShareRedirect(sharingUrl: string): Promise<{ cookie: string; location: string }> {
+  const res = await fetch(sharingUrl, {
+    redirect: "manual",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+  const cookieHeader = res.headers.get("set-cookie") || "";
+  const cookie = cookieHeader.split(";")[0].trim();
+  const location = res.headers.get("location") || "";
+  return { cookie, location };
+}
+
+/** List all files in a shared folder using FedAuth cookie + SharePoint REST API (2 HTTP calls total) */
 export async function listSharedFolder(sharingUrl: string): Promise<SharingLinkItem[]> {
-  const shareId = encodeShareId(sharingUrl);
-  const data = await sharesGet(shareId, "/children?$select=id,name,file,folder,size,webUrl");
+  const { cookie, location } = await fetchShareRedirect(sharingUrl);
+  if (!cookie) throw new Error("No FedAuth cookie returned. Make sure the link is shared as 'Anyone with the link'.");
+  if (!location) throw new Error("SharePoint sharing link did not redirect. The link may have expired.");
 
-  return (data.value || []).map((item: any) => ({
-    id: item.id,
-    name: item.name,
-    mimeType: item.file?.mimeType || "folder",
-    isFolder: !!item.folder,
-    size: item.size || 0,
-    webUrl: item.webUrl,
-    shareId,
+  // Parse personal site path and folder path from the redirect location
+  const personalMatch = location.match(/\/personal\/[^/?]+/);
+  if (!personalMatch) throw new Error("Cannot determine SharePoint personal site path from the sharing link.");
+  const personalPath = personalMatch[0]; // e.g. /personal/collaboration_heroelectronix_com
+
+  const idMatch = decodeURIComponent(location).match(/id=([^&]+)/);
+  if (!idMatch) throw new Error("Cannot determine folder path from the sharing link redirect.");
+  const folderPath = idMatch[1]; // e.g. /personal/.../Cam360
+
+  const siteBase = siteBaseFromSharingUrl(sharingUrl);
+  const siteUrl = `${siteBase}${personalPath}`;
+
+  // SharePoint REST API — list files in the folder
+  const apiUrl = `${siteUrl}/_api/web/GetFolderByServerRelativePath(decodedurl='${encodeURIComponent(folderPath)}')/Files?$select=Name,Length,ServerRelativeUrl,TimeLastModified`;
+  const apiRes = await fetch(apiUrl, {
+    headers: {
+      "Accept": "application/json;odata=verbose",
+      "Cookie": cookie,
+      "User-Agent": "Mozilla/5.0",
+    },
+  });
+  if (!apiRes.ok) {
+    const body = await apiRes.text();
+    throw new Error(`SharePoint API error (${apiRes.status}): ${body.slice(0, 300)}`);
+  }
+
+  const data = await apiRes.json();
+  const files: any[] = data?.d?.results || [];
+
+  return files.map((f: any) => ({
+    id: f.ServerRelativeUrl,
+    name: f.Name,
+    mimeType: f.Name.match(/\.pdf$/i) ? "application/pdf"
+      : f.Name.match(/\.docx?$/i) ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      : "application/octet-stream",
+    isFolder: false,
+    size: Number(f.Length) || 0,
+    webUrl: `${siteBase}${f.ServerRelativeUrl}`,
+    serverRelativeUrl: f.ServerRelativeUrl,
+    fedAuthCookie: cookie,
+    shareId: "",
     sharingUrl,
   }));
 }
 
-/** Get metadata for a single shared file */
+/** Get metadata for a single shared file (individual "Anyone" sharing link) */
 export async function getSharedItemMeta(sharingUrl: string): Promise<SharingLinkItem> {
-  const shareId = encodeShareId(sharingUrl);
-  const item = await sharesGet(shareId);
+  const { cookie, location } = await fetchShareRedirect(sharingUrl);
+
+  const idMatch = decodeURIComponent(location || "").match(/id=([^&]+)/);
+  const serverRelativeUrl = idMatch ? idMatch[1] : "";
+  const name = serverRelativeUrl.split("/").pop() || "Shared Document";
+
   return {
-    id: item.id,
-    name: item.name,
-    mimeType: item.file?.mimeType || "folder",
-    isFolder: !!item.folder,
-    size: item.size || 0,
-    webUrl: item.webUrl,
-    shareId,
+    id: serverRelativeUrl || sharingUrl,
+    name,
+    mimeType: "application/octet-stream",
+    isFolder: false,
+    size: 0,
+    webUrl: sharingUrl,
+    serverRelativeUrl,
+    fedAuthCookie: cookie,
+    shareId: encodeShareId(sharingUrl),
     sharingUrl,
   };
 }
 
-/** Download and extract text from a shared file — NO credentials needed */
+/** Download and extract text from a shared file */
 export async function extractSharedFileContent(item: SharingLinkItem): Promise<string> {
-  // Download via direct URL first (append &download=1)
-  const downloadUrl = item.sharingUrl.includes("?")
-    ? `${item.sharingUrl}&download=1`
-    : `${item.sharingUrl}?download=1`;
-
   let buffer: Buffer;
-  try {
-    const res = await fetch(downloadUrl);
-    if (!res.ok) throw new Error(`Direct download failed (${res.status})`);
+
+  if (item.serverRelativeUrl && item.fedAuthCookie) {
+    // Primary: direct download via SharePoint server-relative URL + FedAuth cookie
+    const siteBase = siteBaseFromSharingUrl(item.sharingUrl);
+    const downloadUrl = `${siteBase}${item.serverRelativeUrl}`;
+    const res = await fetch(downloadUrl, {
+      headers: { "Cookie": item.fedAuthCookie, "User-Agent": "Mozilla/5.0" },
+    });
+    if (!res.ok) throw new Error(`Download failed (${res.status}) for ${item.name}`);
     buffer = Buffer.from(await res.arrayBuffer());
-  } catch {
-    // Fallback: use Graph /shares/{id}/driveItem/content
-    const contentUrl = `${GRAPH_BASE}/shares/${item.shareId}/driveItem/content`;
-    const res = await fetch(contentUrl, { headers: { Accept: "*/*" } });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Cannot download file (${res.status}). Make sure the link is set to "Anyone - doesn't require sign-in": ${body}`);
-    }
+  } else {
+    // Fallback: try direct download via sharing URL with ?download=1
+    const downloadUrl = item.sharingUrl.includes("?")
+      ? `${item.sharingUrl}&download=1`
+      : `${item.sharingUrl}?download=1`;
+    const res = await fetch(downloadUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!res.ok) throw new Error(`Cannot download file (${res.status}). Make sure the link is shared as "Anyone with the link".`);
     buffer = Buffer.from(await res.arrayBuffer());
   }
 
