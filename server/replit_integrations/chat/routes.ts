@@ -24,55 +24,83 @@ const openai = new OpenAI({
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-// ── Embedding helpers ──────────────────────────────────────────────────────
+// ── Search helpers ──────────────────────────────────────────────────────
 
-/** Generate a 1536-dim embedding using text-embedding-3-small */
-async function generateEmbedding(text: string): Promise<number[]> {
-  const input = text.slice(0, 8000); // stay well within token limits
-  const res = await openai.embeddings.create({ model: "text-embedding-3-small", input });
-  return res.data[0].embedding;
+/** Tokenize text into normalized lowercase words, stripping common stop words */
+function tokenize(text: string): string[] {
+  const stopWords = new Set([
+    'the','is','at','which','on','a','an','and','or','to','in','it','of',
+    'for','with','this','that','are','was','be','if','not','can','do','go',
+    'use','from','by','as','you','your','will','may','tip','pro','also',
+    'all','any','has','have','been','then','they','their','its','our',
+    'but','so','when','than','into','after','before','here','there',
+  ]);
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !stopWords.has(w));
 }
 
-/** Cosine similarity between two equal-length vectors */
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, magA = 0, magB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    magA += a[i] * a[i];
-    magB += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
-}
+/** BM25-inspired keyword search — returns top-K most relevant KB entries */
+function searchKBKeyword(
+  query: string,
+  kbs: Awaited<ReturnType<typeof chatStorage.getAllKB>>,
+  topK = 5
+): Awaited<ReturnType<typeof chatStorage.getAllKB>> {
+  if (kbs.length === 0) return [];
 
-/** Generate embedding for a KB entry and persist it (fire-and-forget safe) */
-async function embedKB(id: number, title: string, content: string): Promise<void> {
-  try {
-    const embedding = await generateEmbedding(`${title}\n\n${content}`);
-    await chatStorage.updateKBEmbedding(id, embedding);
-  } catch (err: any) {
-    console.error(`[embed] failed for KB ${id}:`, err.message);
-  }
-}
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0) return kbs.slice(0, topK);
 
-/** Find top-K most semantically similar KB entries to the query */
-async function searchKB(query: string, topK = 5): Promise<(typeof import("@shared/schema").knowledgeBase.$inferSelect)[]> {
-  const kbs = await chatStorage.getAllKB();
-  const withEmbeddings = kbs.filter(k => k.embedding && k.embedding.length > 0);
+  const N = kbs.length;
 
-  if (withEmbeddings.length === 0) {
-    // Fallback: return all if nothing is embedded yet
-    return kbs.slice(0, topK);
-  }
+  // Pre-compute token sets and document frequency
+  const docTokenSets = kbs.map(kb => new Set(tokenize(`${kb.title} ${kb.content}`)));
+  const docFreq = new Map<string, number>();
+  docTokenSets.forEach(ts => ts.forEach(t => docFreq.set(t, (docFreq.get(t) || 0) + 1)));
 
-  const queryEmbedding = await generateEmbedding(query);
+  const queryLower = query.toLowerCase();
 
-  const scored = withEmbeddings.map(k => ({
-    kb: k,
-    score: cosineSimilarity(queryEmbedding, k.embedding as number[]),
-  }));
+  const scored = kbs.map((kb, i) => {
+    const docTokens = docTokenSets[i];
+    let score = 0;
+
+    // IDF-weighted token match
+    queryTokens.forEach(token => {
+      if (docTokens.has(token)) {
+        const df = docFreq.get(token) || 1;
+        const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
+        score += idf;
+      }
+    });
+
+    // Phrase match bonuses (strong signal for exact keywords)
+    const titleLower = kb.title.toLowerCase();
+    const contentLower = kb.content.toLowerCase();
+    if (titleLower.includes(queryLower)) score += 10;
+    if (contentLower.includes(queryLower)) score += 3;
+
+    // Partial word matches in title (e.g. "offline" matches "DeviceOffline")
+    queryTokens.forEach(token => {
+      if (titleLower.includes(token) && !docTokens.has(token)) score += 1;
+    });
+
+    return { kb, score };
+  });
 
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, topK).map(s => s.kb);
+}
+
+/** No-op kept for call-site compatibility — embeddings not supported by current AI proxy */
+async function embedKB(_id: number, _title: string, _content: string): Promise<void> {}
+
+/** Find top-K most relevant KB entries to the query using keyword search */
+async function searchKB(query: string, topK = 5): Promise<Awaited<ReturnType<typeof chatStorage.getAllKB>>> {
+  const kbs = await chatStorage.getAllKB();
+  if (kbs.length === 0) return [];
+  return searchKBKeyword(query, kbs, topK);
 }
 
 export function registerChatRoutes(app: Express): void {

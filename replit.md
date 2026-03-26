@@ -22,10 +22,10 @@ A chat-based AI bot for customer support agents and escalation staff. Supports E
 ## Features
 1. **Chat with AI** — Streaming SSE responses from GPT-5.2
 2. **Source Attribution** — Bot cites KB sources as `[Source: ...]` tags rendered as badges
-3. **Vector Search (RAG)** — KB entries are embedded with `text-embedding-3-small` (1536 dims); at query time only the top-5 most semantically similar docs are injected into the prompt instead of the full KB
-4. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD/DOCX), type tagging, OneDrive Graph API file browser
+3. **Keyword Search (RAG)** — BM25-inspired TF-IDF keyword search; at query time only the top-5 most relevant docs are injected into the prompt. (Vector embeddings not available via Replit AI proxy.)
+4. **Knowledge Base Manager** — CRUD for KB entries, file upload (PDF/TXT/MD/DOCX), type tagging, SharePoint folder browser
 5. **File Import** — Upload PDF/TXT/Markdown/DOCX files; text extracted server-side using `pdf-parse`, `mammoth`, multer
-6. **OneDrive/SharePoint Integration** — Browse SharePoint folder via Graph API; select & import files directly into KB with automatic text extraction; requires `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`
+6. **SharePoint Integration (FedAuth)** — Browse SharePoint "Anyone with the link" shared folders via FedAuth cookie trick (no Azure credentials needed); all 44 Cam360 KB files imported
 6. **Widget Mode** — Zoho CRM embed-ready via `?widget=true` query param
 7. **Multi-language** — English and Hindi supported via system prompt
 8. **Email Gate** — Users must enter a whitelisted email to access the app. First user auto-becomes admin.
