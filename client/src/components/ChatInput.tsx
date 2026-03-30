@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Square, Paperclip, X, FileText, FileSpreadsheet, Film, File } from "lucide-react";
+import { Send, Square, Paperclip, X, FileText, FileSpreadsheet, Film, File as FileIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export interface PendingFile {
   file: File;
   localUrl: string; // object URL for image previews
+  displayName?: string; // overrides file.name for display (e.g. pasted images)
 }
 
 interface ChatInputProps {
@@ -31,7 +32,7 @@ function fileIcon(file: File) {
   if (file.type.includes("pdf")) return <FileText className="w-4 h-4 text-red-500" />;
   if (file.type.includes("sheet") || file.type.includes("excel")) return <FileSpreadsheet className="w-4 h-4 text-green-600" />;
   if (file.type.includes("word")) return <FileText className="w-4 h-4 text-blue-500" />;
-  return <File className="w-4 h-4 text-muted-foreground" />;
+  return <FileIcon className="w-4 h-4 text-muted-foreground" />;
 }
 
 export function ChatInput({ onSend, isStreaming, onStop }: ChatInputProps) {
@@ -105,10 +106,9 @@ export function ChatInput({ onSend, isStreaming, onStop }: ChatInputProps) {
     imageItems.forEach((item, idx) => {
       const file = item.getAsFile();
       if (!file) return;
-      // Give pasted images a sensible filename
       const ext = item.type.split("/")[1] || "png";
-      const namedFile = new File([file], `pasted-image-${Date.now()}-${idx}.${ext}`, { type: item.type });
-      toAdd.push({ file: namedFile, localUrl: URL.createObjectURL(namedFile) });
+      const displayName = `pasted-image-${Date.now()}-${idx}.${ext}`;
+      toAdd.push({ file, localUrl: URL.createObjectURL(file), displayName });
     });
     if (toAdd.length > 0) setPendingFiles(prev => [...prev, ...toAdd]);
   };
@@ -139,7 +139,7 @@ export function ChatInput({ onSend, isStreaming, onStop }: ChatInputProps) {
               ) : (
                 <span className="shrink-0">{fileIcon(pf.file)}</span>
               )}
-              <span className="truncate max-w-[110px]">{pf.file.name}</span>
+              <span className="truncate max-w-[110px]">{pf.displayName ?? pf.file.name}</span>
               <button
                 onClick={() => removeFile(idx)}
                 className="shrink-0 text-muted-foreground hover:text-destructive transition-colors"

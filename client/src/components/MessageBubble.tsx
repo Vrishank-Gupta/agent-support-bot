@@ -1,4 +1,4 @@
-import { Bot, User, BookOpen, FileText, FileSpreadsheet, Film, File } from "lucide-react";
+import { Bot, User, BookOpen, FileText, FileSpreadsheet, Film, File as FileIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { format } from "date-fns";
 import type { PendingFile } from "@/components/ChatInput";
@@ -39,13 +39,13 @@ function AttachmentPill({ pf }: { pf: PendingFile }) {
   ) : isWord ? (
     <FileText className="w-4 h-4 text-blue-400" />
   ) : (
-    <File className="w-4 h-4 text-white/60" />
+    <FileIcon className="w-4 h-4 text-white/60" />
   );
 
   return (
     <div className="flex items-center gap-1.5 bg-white/10 rounded-lg px-2.5 py-1.5 text-xs text-primary-foreground/90 border border-white/15">
       {icon}
-      <span className="truncate max-w-[140px]">{pf.file.name}</span>
+      <span className="truncate max-w-[140px]">{pf.displayName ?? pf.file.name}</span>
     </div>
   );
 }
