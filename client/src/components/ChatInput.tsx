@@ -94,6 +94,25 @@ export function ChatInput({ onSend, isStreaming, onStop }: ChatInputProps) {
     handleFiles(e.dataTransfer.files);
   };
 
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageItems = Array.from(items).filter(item => item.type.startsWith("image/"));
+    if (imageItems.length === 0) return;
+    // Prevent default only when there are images to capture
+    e.preventDefault();
+    const toAdd: PendingFile[] = [];
+    imageItems.forEach((item, idx) => {
+      const file = item.getAsFile();
+      if (!file) return;
+      // Give pasted images a sensible filename
+      const ext = item.type.split("/")[1] || "png";
+      const namedFile = new File([file], `pasted-image-${Date.now()}-${idx}.${ext}`, { type: item.type });
+      toAdd.push({ file: namedFile, localUrl: URL.createObjectURL(namedFile) });
+    });
+    if (toAdd.length > 0) setPendingFiles(prev => [...prev, ...toAdd]);
+  };
+
   const canSend = (input.trim().length > 0 || pendingFiles.length > 0) && !isStreaming;
 
   return (
@@ -164,6 +183,7 @@ export function ChatInput({ onSend, isStreaming, onStop }: ChatInputProps) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="Ask a support question in English or Hindi..."
           className="w-full max-h-[120px] min-h-[44px] bg-transparent border-0 resize-none py-2.5 px-3 text-sm focus:outline-none focus:ring-0 placeholder:text-muted-foreground/60 chat-scroll"
           rows={1}
