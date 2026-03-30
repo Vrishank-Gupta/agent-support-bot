@@ -26,6 +26,9 @@ export const knowledgeBase = pgTable("knowledge_base", {
   modelNumbers: text("model_numbers").array().default([]).notNull(),
   embedding: real("embedding").array(), // vector embedding for similarity search (text-embedding-3-small = 1536 dims)
   sourceUrl: text("source_url"), // original OneDrive/SharePoint URL for refresh
+  firmwareRequired: text("firmware_required").default("not_applicable").notNull(),
+  appVersionRequired: text("app_version_required").default("not_applicable").notNull(),
+  fileHash: text("file_hash"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
