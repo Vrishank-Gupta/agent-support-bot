@@ -78,6 +78,22 @@ export function useDeleteConversation() {
   });
 }
 
+// Upload a single file attachment, returns the attachment id
+async function uploadAttachment(conversationId: number, file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`/api/conversations/${conversationId}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `Failed to upload ${file.name}`);
+  }
+  const data = await res.json();
+  return data.id as string;
+}
+
 // Streaming Chat Hook
 export function useChatStream(conversationId: number | null) {
   const [isStreaming, setIsStreaming] = useState(false);
@@ -86,7 +102,7 @@ export function useChatStream(conversationId: number | null) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const sendMessage = useCallback(async (content: string) => {
+  const sendMessage = useCallback(async (content: string, files?: File[]) => {
     if (!conversationId) return;
 
     setIsStreaming(true);
@@ -94,12 +110,20 @@ export function useChatStream(conversationId: number | null) {
     abortControllerRef.current = new AbortController();
 
     try {
+      // Upload attachments first (before streaming starts)
+      let attachmentIds: string[] = [];
+      if (files && files.length > 0) {
+        attachmentIds = await Promise.all(
+          files.map(f => uploadAttachment(conversationId, f))
+        );
+      }
+
       const url = buildUrl(api.conversations.sendMessage.path, { id: conversationId });
       
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, attachmentIds }),
         signal: abortControllerRef.current.signal,
       });
 

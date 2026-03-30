@@ -2,8 +2,14 @@ import type { Express, Request, Response } from "express";
 import OpenAI from "openai";
 import multer from "multer";
 import { createRequire } from "module";
+import { randomUUID } from "crypto";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import fs from "fs/promises";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
+const mammoth = require("mammoth");
+const XLSX = require("xlsx");
 import { chatStorage } from "./storage";
 import type { ConversationState } from "@shared/schema";
 import {
@@ -23,7 +29,43 @@ const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+// ── Attachment in-memory store (transient, cleared after use) ────────────────
+interface AttachmentData {
+  id: string;
+  filename: string;
+  mimeType: string;
+  kind: "image" | "text" | "video_frame";
+  base64DataUrl?: string;  // images + video frames
+  extractedText?: string;  // PDFs, Word, Excel
+}
+const attachmentStore = new Map<string, AttachmentData>();
+
+const execFileAsync = promisify(execFile);
+
+async function extractVideoFrame(buffer: Buffer): Promise<string | null> {
+  const tmpIn = `/tmp/att_${Date.now()}.in`;
+  const tmpOut = `/tmp/att_${Date.now()}.jpg`;
+  try {
+    await fs.writeFile(tmpIn, buffer);
+    await execFileAsync("ffmpeg", ["-i", tmpIn, "-ss", "00:00:01", "-vframes", "1", "-y", tmpOut]);
+    const frame = await fs.readFile(tmpOut);
+    return `data:image/jpeg;base64,${frame.toString("base64")}`;
+  } catch {
+    return null;
+  } finally {
+    await Promise.all([fs.unlink(tmpIn).catch(() => {}), fs.unlink(tmpOut).catch(() => {})]);
+  }
+}
+
+function excelToText(buffer: Buffer): string {
+  const wb = XLSX.read(buffer, { type: "buffer" });
+  return wb.SheetNames.map((name: string) => {
+    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
+    return `Sheet: ${name}\n${csv}`;
+  }).join("\n\n");
+}
 
 // ── Search helpers ──────────────────────────────────────────────────────
 
@@ -505,6 +547,76 @@ export function registerChatRoutes(app: Express): void {
   });
 
   // ══════════════════════════════════════════════════
+  // ATTACHMENT UPLOAD
+  // ══════════════════════════════════════════════════
+
+  app.post(
+    "/api/conversations/:id/attachments",
+    upload.single("file"),
+    async (req: Request, res: Response) => {
+      try {
+        if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+        const { originalname, mimetype, buffer } = req.file;
+        const id = randomUUID();
+        const attachment: AttachmentData = { id, filename: originalname, mimeType: mimetype, kind: "text" };
+
+        if (mimetype.startsWith("image/")) {
+          attachment.kind = "image";
+          attachment.base64DataUrl = `data:${mimetype};base64,${buffer.toString("base64")}`;
+
+        } else if (mimetype === "application/pdf") {
+          const parsed = await pdf(buffer);
+          attachment.extractedText = parsed.text?.slice(0, 40000) ?? "";
+
+        } else if (
+          mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+          mimetype === "application/msword"
+        ) {
+          const result = await mammoth.extractRawText({ buffer });
+          attachment.extractedText = result.value?.slice(0, 40000) ?? "";
+
+        } else if (
+          mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+          mimetype === "application/vnd.ms-excel"
+        ) {
+          attachment.extractedText = excelToText(buffer).slice(0, 40000);
+
+        } else if (mimetype.startsWith("video/")) {
+          attachment.kind = "video_frame";
+          const frame = await extractVideoFrame(buffer);
+          if (frame) {
+            attachment.base64DataUrl = frame;
+          } else {
+            // Fallback: just note the video was attached
+            attachment.kind = "text";
+            attachment.extractedText = `[Video file attached: ${originalname}. Frame extraction was not possible.]`;
+          }
+
+        } else {
+          return res.status(415).json({ error: `Unsupported file type: ${mimetype}` });
+        }
+
+        attachmentStore.set(id, attachment);
+
+        // Auto-purge after 30 minutes (server memory guard)
+        setTimeout(() => attachmentStore.delete(id), 30 * 60 * 1000);
+
+        res.json({
+          id,
+          filename: originalname,
+          mimeType: mimetype,
+          kind: attachment.kind,
+          hasPreview: !!attachment.base64DataUrl,
+        });
+      } catch (error) {
+        console.error("Attachment upload error:", error);
+        res.status(500).json({ error: "Failed to process attachment" });
+      }
+    }
+  );
+
+  // ══════════════════════════════════════════════════
   // ONEDRIVE GRAPH API — BROWSE & IMPORT
   // ══════════════════════════════════════════════════
 
@@ -800,15 +912,26 @@ export function registerChatRoutes(app: Express): void {
   app.post("/api/conversations/:id/messages", async (req: Request, res: Response) => {
     try {
       const conversationId = parseInt(req.params.id);
-      const { content } = req.body;
+      const { content, attachmentIds } = req.body;
 
-      await chatStorage.createMessage(conversationId, "user", content);
+      // Resolve any uploaded attachments
+      const attachments: AttachmentData[] = ((attachmentIds ?? []) as string[])
+        .map(id => attachmentStore.get(id))
+        .filter(Boolean) as AttachmentData[];
+
+      // Build the display text saved to DB (attachment labels appended so history is readable)
+      const attachmentLabels = attachments
+        .map(a => `[Attached: ${a.filename}${a.kind === "video_frame" ? " (video frame)" : ""}]`)
+        .join(" ");
+      const userDisplayContent = [content, attachmentLabels].filter(Boolean).join("\n");
+
+      await chatStorage.createMessage(conversationId, "user", userDisplayContent);
 
       // 1. Load conversation state — drives stage-aware search and prompt injection
       const state = await chatStorage.getConversationState(conversationId);
 
       // 2. State-aware KB search: enriches query with known issue/product/stage context
-      const relevantKBs = await searchKBWithState(content, state, 5);
+      const relevantKBs = await searchKBWithState(content || attachments.map(a => a.filename).join(" "), state, 5);
       const kbContext = relevantKBs.map(k => {
         const tags: string[] = [];
         if (k.productCategories?.length) tags.push(`Product: ${k.productCategories.join(", ")}`);
@@ -821,10 +944,36 @@ export function registerChatRoutes(app: Express): void {
       }).join("\n\n");
 
       const messages = await chatStorage.getMessagesByConversation(conversationId);
-      const chatMessages = messages.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }));
+      // Build chat messages — use multimodal content for the last user message if attachments exist
+      const chatMessages: Array<{ role: "user" | "assistant" | "system"; content: any }> = messages.map((m, idx) => {
+        const isLastUserMsg = idx === messages.length - 1 && m.role === "user" && attachments.length > 0;
+        if (!isLastUserMsg) {
+          return { role: m.role as "user" | "assistant", content: m.content };
+        }
+
+        // Build multimodal content array
+        const textParts: string[] = [];
+        if (content) textParts.push(content);
+        const contentParts: any[] = [];
+
+        for (const att of attachments) {
+          if ((att.kind === "image" || att.kind === "video_frame") && att.base64DataUrl) {
+            if (att.kind === "video_frame") {
+              textParts.push(`[Frame extracted from video: ${att.filename}. Analyse what is visible.]`);
+            }
+            contentParts.push({ type: "image_url", image_url: { url: att.base64DataUrl } });
+          } else if (att.extractedText) {
+            textParts.push(`[Attached document: ${att.filename}]\n${att.extractedText}`);
+          }
+          attachmentStore.delete(att.id); // clean up after use
+        }
+
+        if (textParts.length > 0) {
+          contentParts.unshift({ type: "text", text: textParts.join("\n\n") });
+        }
+
+        return { role: "user" as const, content: contentParts.length > 0 ? contentParts : m.content };
+      });
 
       // 3. Build system prompt — inject CURRENT SESSION STATE block at the top
       const savedPrompt = await chatStorage.getSetting("system_prompt");

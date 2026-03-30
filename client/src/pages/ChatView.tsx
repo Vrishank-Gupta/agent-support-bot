@@ -4,6 +4,7 @@ import { Bot, Info } from "lucide-react";
 import { useConversation, useChatStream } from "@/hooks/use-chat";
 import { MessageBubble } from "@/components/MessageBubble";
 import { ChatInput } from "@/components/ChatInput";
+import type { PendingFile } from "@/components/ChatInput";
 
 export function ChatView() {
   const params = useParams();
@@ -16,6 +17,7 @@ export function ChatView() {
   
   // Local state for optimistic user messages
   const [optimisticMessage, setOptimisticMessage] = useState<string | null>(null);
+  const [optimisticFiles, setOptimisticFiles] = useState<PendingFile[]>([]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -31,12 +33,19 @@ export function ChatView() {
   useEffect(() => {
     if (!isStreaming && streamedContent === "") {
       setOptimisticMessage(null);
+      setOptimisticFiles([]);
     }
   }, [isStreaming, streamedContent, conversation?.messages]);
 
-  const handleSend = async (content: string) => {
-    setOptimisticMessage(content);
-    await sendMessage(content);
+  const handleSend = async (content: string, files: File[]) => {
+    // Build local previews for optimistic display
+    const previews: PendingFile[] = files.map(f => ({
+      file: f,
+      localUrl: URL.createObjectURL(f),
+    }));
+    setOptimisticMessage(content || null);
+    setOptimisticFiles(previews);
+    await sendMessage(content, files);
   };
 
   if (!id) {
@@ -93,14 +102,14 @@ export function ChatView() {
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto chat-scroll p-4 md:p-6" ref={scrollRef}>
         <div className="max-w-4xl mx-auto w-full">
-          {!hasMessages && !optimisticMessage && (
+          {!hasMessages && !optimisticMessage && optimisticFiles.length === 0 && (
             <div className="py-20 text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 text-primary mb-4">
                 <Bot className="w-8 h-8" />
               </div>
               <h3 className="text-lg font-semibold text-foreground mb-2">How can I help you today?</h3>
               <p className="text-sm text-muted-foreground max-w-sm mx-auto">
-                Ask me troubleshooting questions. I can search previous Zoho tickets and the Microsoft OneDrive knowledge base.
+                Ask me troubleshooting questions, or attach screenshots, documents, and videos to help diagnose the issue.
               </p>
             </div>
           )}
@@ -116,10 +125,11 @@ export function ChatView() {
           ))}
 
           {/* Optimistic User Message */}
-          {optimisticMessage && (
+          {(optimisticMessage || optimisticFiles.length > 0) && (
             <MessageBubble 
               role="user"
-              content={optimisticMessage}
+              content={optimisticMessage ?? ""}
+              optimisticFiles={optimisticFiles}
               createdAt={new Date()}
             />
           )}
