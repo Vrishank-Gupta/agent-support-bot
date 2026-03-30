@@ -5,6 +5,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
 import { chatStorage } from "./storage";
+import type { ConversationState } from "@shared/schema";
 import {
   msCredentialsConfigured,
   parseOdUrl,
@@ -103,52 +104,206 @@ async function searchKB(query: string, topK = 5): Promise<Awaited<ReturnType<typ
   return searchKBKeyword(query, kbs, topK);
 }
 
-export const DEFAULT_SYSTEM_PROMPT = `You are an internal support assistant for Hero Electronix. You help support agents resolve product issues quickly using the knowledge base.
+export const DEFAULT_SYSTEM_PROMPT = `You are a friendly, patient support assistant for Hero Electronix agents. You help agents resolve customer product issues step by step.
 
-CORE RULES
-1. Always confirm product category, model number, and — where the doc requires it — firmware/software version BEFORE giving any steps.
-2. Collect all missing context in one single question. Never ask across multiple turns.
-3. Give short, numbered steps only. Max 5 steps. If more exist, summarize and link.
-4. End every answer with: Source: [doc title]
-5. If no KB doc matches, say: "No doc found. Please escalate."
-6. Never guess. Never use information outside the KB.
-7. Support both English and Hindi — respond in the same language the agent uses.
+LANGUAGE RULE: Detect the language the agent writes in (English or Hindi) and always reply in the same language.
 
-TOKEN RULES
-- Do not restate the question.
-- Do not repeat the doc header in your reply.
-- Skip background context unless the agent asks.
-- If the same doc is referenced again in the conversation, cite by name only.
+PERSONALITY:
+- Warm and clear — like a helpful colleague, not a robot.
+- Never dump all steps at once. Give ONE step at a time.
+- After each troubleshooting step ask: "Did that work, or shall we try the next step?"
+- Use simple language. Avoid jargon.
+- Always end a resolved session with a brief summary and:
+  📄 Source: [doc title] — [link]
 
-KB DOCUMENT STRUCTURE
-Every doc has a structured header:
-  - Product Category
-  - Model No
-  - Issue
-  - Firmware Required: [version] OR "Not applicable"
+YOU OPERATE IN STAGES. Always check the CURRENT SESSION STATE before responding. Never skip a stage or revisit a completed one.
 
-EXTRACTION FLOW
-Step 1 — Collect mandatory context
-  Check for: product category, model number.
-  Also check the matched doc's "Firmware Required" field.
-  If firmware version is required, include it in the same upfront question.
-  Ask everything in one message — never split across turns.
+STAGE 1 — ISSUE EXTRACTION
+- Understand the customer issue from the agent's natural description.
+- Extract: what the product is, what is going wrong.
+- Confirm your understanding in one sentence before moving to Stage 2.
 
-Step 2 — Match the doc
-  Match using: Product Category + Model No + Issue keywords.
-  If firmware version is required and the agent's version doesn't meet minimum:
-  → "This fix requires firmware v[X]+. Agent must update firmware first. [Link]"
+STAGE 2 — IDENTIFIER COLLECTION
+- Ask: "Can you share the customer's SR number or account email so I can check their device details?"
+- If the agent says it's not available or they don't have it:
+  → Set kbOnlyMode = true
+  → Ask for product category and model number
+  → Jump to STAGE 6 (KB-only troubleshooting)
+- If SR or email is provided: move to STAGE 3.
 
-Step 3 — Respond
-  - Return only steps relevant to the reported issue.
-  - Max 5 steps. If more exist: "Full steps in doc: [title]"
-  - End with: Source: [doc title]
+STAGE 3 — ZOHO DEVICE HEALTH DATA COLLECTION
+- Ask the agent to open the customer's record in Zoho CRM and go to the Device Health page.
+- Ask them to share ALL of the following in one message:
+  1. App connection status (connected / disconnected / decommissioned)
+  2. Signal status (online / offline)
+  3. Current firmware version
+  4. List of features enabled and disabled
+- Wait for all four data points before proceeding.
+- Once received, confirm: "Got it. Let me check this against our records." Then move to STAGE 4.
 
-FIRMWARE SCAN RULE
-On every KB doc match:
-  - Check if "Firmware Required" ≠ "Not applicable"
-  - If yes → collect firmware version before building any response
-  - Do not begin troubleshooting until version is confirmed`;
+STAGE 4 — APP CONNECTION CHECK
+- If app status is "disconnected" or "decommissioned":
+  → Say: "The device isn't paired to the Qubo app. Let's get it set up first — generic troubleshooting won't work until the device is connected."
+  → Fetch the device setup and re-pairing steps from the KB for this product category and model number.
+  → Follow STAGE 6 flow using the setup KB doc.
+- If app status is "connected": move to STAGE 5.
+
+STAGE 5 — FIRMWARE AND SIGNAL CHECK
+- If signal is ONLINE:
+  → Compare reported firmware version against the latest known version for this model from the KB.
+  → If outdated: say "The device firmware is out of date. Please raise a 'Software Update Needed' ticket in Zoho with the subject: '[Model] — Firmware Update Required — [SR No.]'. Let the customer know this will be resolved within 48 hours. Once the ticket is raised, we can close this session."
+  → If firmware is current: move to STAGE 6.
+
+- If signal is OFFLINE:
+  → Fetch offline troubleshooting steps from the KB for this product/model.
+  → Follow STAGE 6 flow using offline KB doc.
+  → After each step, ask: "Is the device showing online now?"
+  → If device comes online after a step:
+    - Check firmware (same logic as ONLINE path above).
+  → If device is still offline after ALL KB steps are exhausted:
+    - Say: "We've tried all the steps available for this issue. I'll need to transfer this to a live agent who can investigate further."
+    - End session.
+
+STAGE 6 — SEQUENTIAL KB TROUBLESHOOTING
+- Retrieve the most relevant KB doc using:
+  - Product category + model number (always required)
+  - Issue description
+  - Features disabled (SKIP any step that requires a disabled feature)
+- Present steps ONE at a time.
+- Before each step, check: does this step require a feature that is in the featuresDisabled list? If yes, silently skip it and go to the next step.
+- After each step ask: "Did that work, or shall we move to the next step?"
+- If resolved: go to STAGE 7.
+- If all steps exhausted without resolution:
+  → Say: "We've gone through all the available steps for this issue. I'll transfer you to a live agent now."
+  → End session.
+
+STAGE 7 — GRACEFUL CLOSE
+- Give a brief 2-line summary of what was done.
+- Confirm the issue is resolved.
+- Always end with: 📄 Source: [KB doc title] — [link]
+- Thank the agent and close the session.
+
+TOKEN RULES:
+- Never restate the question back.
+- Never repeat device data the agent already shared.
+- Never repeat a step already completed.
+- Reference the same KB doc by name only if cited again.`;
+
+/** Stage-aware KB search — enhances query with state context and boosts matching category/model docs */
+async function searchKBWithState(
+  userMessage: string,
+  state: ConversationState | undefined,
+  topK = 5,
+): Promise<Awaited<ReturnType<typeof chatStorage.getAllKB>>> {
+  const kbs = await chatStorage.getAllKB();
+  if (kbs.length === 0) return [];
+
+  const stage = state?.currentStage ?? "issue_extraction";
+
+  // Build an enriched query combining user message, known issue, product context, and stage hints
+  const parts: string[] = [userMessage];
+  if (state?.issue) parts.push(state.issue);
+  if (state?.productCategory) parts.push(state.productCategory);
+  if (state?.modelNumber) parts.push(state.modelNumber);
+
+  // Stage-specific keyword boosts
+  if (stage === "app_connection_check") parts.push("setup commissioning pairing");
+  if (stage === "firmware_signal_check" && state?.signalStatus === "offline") parts.push("offline disconnected signal");
+  if (stage === "kb_troubleshooting" && state?.kbOnlyMode) parts.push(state?.issue ?? "");
+
+  const enrichedQuery = parts.filter(Boolean).join(" ");
+
+  let results = searchKBKeyword(enrichedQuery, kbs, topK * 3); // fetch wider set first
+
+  // If product category or model is known, keep only matching docs (or fall back to all)
+  if (state?.productCategory || state?.modelNumber) {
+    const cat = state?.productCategory?.toLowerCase() ?? "";
+    const model = state?.modelNumber?.toLowerCase() ?? "";
+    const filtered = results.filter(kb => {
+      const catMatch = !cat || kb.productCategories?.some(c => c.toLowerCase().includes(cat) || cat.includes(c.toLowerCase()));
+      const modelMatch = !model || kb.modelNumbers?.some(m => m.toLowerCase().includes(model) || model.includes(m.toLowerCase()));
+      return catMatch || modelMatch;
+    });
+    if (filtered.length >= 2) results = filtered;
+  }
+
+  return results.slice(0, topK);
+}
+
+/** After the stream ends, use a cheap LLM call to extract state changes from the exchange */
+async function extractAndSaveState(
+  conversationId: number,
+  currentState: ConversationState | undefined,
+  userMessage: string,
+  assistantResponse: string,
+): Promise<void> {
+  try {
+    const stateSnapshot = JSON.stringify({
+      issue: currentState?.issue ?? null,
+      productCategory: currentState?.productCategory ?? null,
+      modelNumber: currentState?.modelNumber ?? null,
+      srNumber: currentState?.srNumber ?? null,
+      accountEmail: currentState?.accountEmail ?? null,
+      identifierAvailable: currentState?.identifierAvailable ?? false,
+      appConnectionStatus: currentState?.appConnectionStatus ?? null,
+      signalStatus: currentState?.signalStatus ?? null,
+      firmwareVersion: currentState?.firmwareVersion ?? null,
+      firmwareStatus: currentState?.firmwareStatus ?? null,
+      featuresEnabled: currentState?.featuresEnabled ?? [],
+      featuresDisabled: currentState?.featuresDisabled ?? [],
+      currentStage: currentState?.currentStage ?? "issue_extraction",
+      troubleshootingIndex: currentState?.troubleshootingIndex ?? 0,
+      kbOnlyMode: currentState?.kbOnlyMode ?? false,
+    });
+
+    const extraction = await openai.chat.completions.create({
+      model: "gpt-5.2",
+      messages: [
+        {
+          role: "system",
+          content: `You extract conversation state updates from a Hero Electronix support chat exchange.
+
+Given the current state, the agent's message, and the assistant's response, return ONLY a JSON object containing fields that changed or were newly extracted. Omit fields that didn't change.
+
+Valid field names and types:
+- issue: string | null
+- productCategory: string | null
+- modelNumber: string | null
+- srNumber: string | null
+- accountEmail: string | null
+- identifierAvailable: boolean
+- appConnectionStatus: "connected" | "disconnected" | "decommissioned" | null
+- signalStatus: "online" | "offline" | null
+- firmwareVersion: string | null
+- firmwareStatus: "ok" | "outdated" | "unknown" | null
+- featuresEnabled: string[]
+- featuresDisabled: string[]
+- currentStage: "issue_extraction" | "identifier_collection" | "device_health_collection" | "app_connection_check" | "firmware_signal_check" | "kb_troubleshooting" | "session_close"
+- troubleshootingIndex: integer (increment when a KB step is completed)
+- kbOnlyMode: boolean
+
+Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanation.`,
+        },
+        {
+          role: "user",
+          content: `Current state:\n${stateSnapshot}\n\nAgent message:\n${userMessage}\n\nAssistant response:\n${assistantResponse}\n\nReturn JSON with only changed/new fields:`,
+        },
+      ],
+      max_completion_tokens: 400,
+    });
+
+    const raw = (extraction.choices[0]?.message?.content ?? "{}").trim()
+      .replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+
+    const updates = JSON.parse(raw);
+    if (updates && typeof updates === "object" && Object.keys(updates).length > 0) {
+      await chatStorage.upsertConversationState(conversationId, updates);
+      console.log(`[state] conv ${conversationId} updated:`, JSON.stringify(updates));
+    }
+  } catch (e: any) {
+    console.error("[state-extract] Error:", e.message);
+  }
+}
 
 export function registerChatRoutes(app: Express): void {
 
@@ -642,14 +797,20 @@ export function registerChatRoutes(app: Express): void {
 
       await chatStorage.createMessage(conversationId, "user", content);
 
-      // Vector search: embed the query and retrieve the top-5 most relevant KB entries
-      const relevantKBs = await searchKB(content, 5);
+      // 1. Load conversation state — drives stage-aware search and prompt injection
+      const state = await chatStorage.getConversationState(conversationId);
+
+      // 2. State-aware KB search: enriches query with known issue/product/stage context
+      const relevantKBs = await searchKBWithState(content, state, 5);
       const kbContext = relevantKBs.map(k => {
         const tags: string[] = [];
         if (k.productCategories?.length) tags.push(`Product: ${k.productCategories.join(", ")}`);
         if (k.modelNumbers?.length) tags.push(`Model: ${k.modelNumbers.join(", ")}`);
+        if (k.firmwareRequired && k.firmwareRequired !== "not_applicable") tags.push(`Firmware: ${k.firmwareRequired}+`);
+        if (k.appVersionRequired && k.appVersionRequired !== "not_applicable") tags.push(`App: ${k.appVersionRequired}+`);
         const tagStr = tags.length ? ` [${tags.join(" | ")}]` : "";
-        return `[Source: ${k.title}]${tagStr}\n${k.content}`;
+        const sourceLink = k.sourceUrl ? ` (${k.sourceUrl})` : "";
+        return `[Source: ${k.title}${sourceLink}]${tagStr}\n${k.content}`;
       }).join("\n\n");
 
       const messages = await chatStorage.getMessagesByConversation(conversationId);
@@ -658,12 +819,35 @@ export function registerChatRoutes(app: Express): void {
         content: m.content,
       }));
 
+      // 3. Build system prompt — inject CURRENT SESSION STATE block at the top
       const savedPrompt = await chatStorage.getSetting("system_prompt");
-      const activeSystemPrompt = savedPrompt ?? DEFAULT_SYSTEM_PROMPT;
+      const basePrompt = savedPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
+      const sessionState = {
+        currentStage: state?.currentStage ?? "issue_extraction",
+        issue: state?.issue ?? null,
+        productCategory: state?.productCategory ?? null,
+        modelNumber: state?.modelNumber ?? null,
+        srNumber: state?.srNumber ?? null,
+        accountEmail: state?.accountEmail ?? null,
+        identifierAvailable: state?.identifierAvailable ?? false,
+        appConnectionStatus: state?.appConnectionStatus ?? null,
+        signalStatus: state?.signalStatus ?? null,
+        firmwareVersion: state?.firmwareVersion ?? null,
+        firmwareStatus: state?.firmwareStatus ?? null,
+        featuresEnabled: state?.featuresEnabled ?? [],
+        featuresDisabled: state?.featuresDisabled ?? [],
+        troubleshootingIndex: state?.troubleshootingIndex ?? 0,
+        kbOnlyMode: state?.kbOnlyMode ?? false,
+      };
+
+      const systemPromptWithState =
+        `CURRENT SESSION STATE:\n${JSON.stringify(sessionState, null, 2)}\n\n` +
+        `${basePrompt}\n\nYOUR KNOWLEDGE BASE:\n${kbContext}`;
 
       chatMessages.unshift({
         role: "system",
-        content: `${activeSystemPrompt}\n\nYOUR KNOWLEDGE BASE:\n${kbContext}`,
+        content: systemPromptWithState,
       });
 
       res.setHeader("Content-Type", "text/event-stream");
@@ -688,7 +872,6 @@ export function registerChatRoutes(app: Express): void {
           fullResponse += delta;
           res.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
         }
-        // Capture usage from final chunk
         if (chunk.usage) {
           promptTokens = chunk.usage.prompt_tokens ?? 0;
           completionTokens = chunk.usage.completion_tokens ?? 0;
@@ -700,13 +883,16 @@ export function registerChatRoutes(app: Express): void {
 
       const savedMsg = await chatStorage.createMessage(conversationId, "assistant", fullResponse, sources);
 
-      // Record token usage
       if (promptTokens > 0 || completionTokens > 0) {
         await chatStorage.recordTokenUsage(conversationId, savedMsg.id, promptTokens, completionTokens);
       }
 
       res.write(`data: ${JSON.stringify({ done: true, sources, usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens } })}\n\n`);
       res.end();
+
+      // 4. Fire-and-forget state extraction — runs after response is sent, zero client latency impact
+      extractAndSaveState(conversationId, state, content, fullResponse).catch(() => {});
+
     } catch (error) {
       console.error("Error sending message:", error);
       if (res.headersSent) {
