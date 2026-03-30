@@ -8,6 +8,7 @@ import { Layout } from "@/pages/Layout";
 import { KBManager } from "@/pages/KBManager";
 import { AdminPanel } from "@/pages/AdminPanel";
 import { BotSettings } from "@/pages/BotSettings";
+import { KBSettings } from "@/pages/KBSettings";
 import { UserProvider } from "@/lib/userContext";
 import { EmailGate } from "@/components/EmailGate";
 
@@ -20,6 +21,7 @@ function Router() {
         <Route path="/kb" component={KBManager} />
         <Route path="/admin" component={AdminPanel} />
         <Route path="/bot-settings" component={BotSettings} />
+        <Route path="/kb-settings" component={KBSettings} />
         <Route component={NotFound} />
       </Switch>
     </EmailGate>

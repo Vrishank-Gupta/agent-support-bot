@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User, SlidersHorizontal } from "lucide-react";
+import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User, SlidersHorizontal, Database } from "lucide-react";
 import { useConversations, useCreateConversation, useDeleteConversation } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
@@ -48,6 +48,16 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
 
         {isAdmin && (
           <>
+            <Link href="/kb-settings">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start gap-2 ${location === "/kb-settings" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                data-testid="link-kb-settings"
+              >
+                <Database className="w-4 h-4" />
+                KB Settings
+              </Button>
+            </Link>
             <Link href="/bot-settings">
               <Button
                 variant="ghost"
