@@ -134,11 +134,15 @@ export function BotSettings() {
             {/* Info banner */}
             <div className="flex items-start gap-3 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-4 text-sm text-blue-800 dark:text-blue-300">
               <Info className="w-4 h-4 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium mb-1">How this works</p>
+              <div className="space-y-1.5">
+                <p className="font-medium">How this works</p>
                 <p className="text-blue-700 dark:text-blue-400">
-                  This prompt is sent to the AI at the start of every conversation, defining its role, rules, and behaviour.
-                  The bot's knowledge base articles are automatically appended after this prompt — you don't need to add them here.
+                  This prompt is injected at the start of every conversation, defining the bot's role, rules, and behaviour.
+                  KB articles are automatically appended only when the session reaches Stage 4 or later — you don't need to add them here.
+                </p>
+                <p className="text-blue-700 dark:text-blue-400">
+                  <span className="font-mono bg-blue-100 dark:bg-blue-900/50 px-1 py-0.5 rounded text-xs">{"{{SESSION_STATE}}"}</span>
+                  {" "}is replaced automatically at runtime with the live JSON state of the current session (stage, model, SR number, etc.).
                 </p>
               </div>
             </div>
@@ -172,27 +176,31 @@ export function BotSettings() {
               )}
             </div>
 
-            {/* Tips */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {[
-                {
-                  title: "Core Rules",
-                  tip: "Define what the bot must always do — like confirming product info before giving steps, or how many steps to return.",
-                },
-                {
-                  title: "Tone & Language",
-                  tip: "Set whether the bot should respond in Hindi or English, formal or casual, short or detailed.",
-                },
-                {
-                  title: "Escalation Rules",
-                  tip: 'Tell the bot when to escalate — e.g. "If no KB doc matches, say: No doc found. Please escalate."',
-                },
-              ].map((item) => (
-                <div key={item.title} className="bg-muted/40 border border-border/50 rounded-lg p-3">
-                  <p className="text-xs font-semibold text-foreground mb-1">{item.title}</p>
-                  <p className="text-xs text-muted-foreground">{item.tip}</p>
-                </div>
-              ))}
+            {/* 7-stage flow reference */}
+            <div className="bg-card border border-border rounded-xl shadow-sm p-4">
+              <p className="text-xs font-semibold text-foreground mb-3">7-Stage Conversation Flow</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                {[
+                  { stage: "1", label: "Issue Extraction", desc: "Understand what the product is and what's going wrong." },
+                  { stage: "2", label: "Identifier Collection", desc: "Collect SR number or account email. No ID → KB-only mode." },
+                  { stage: "3", label: "Device Settings", desc: "Retrieve Zoho CRM device data — status, firmware, RSSI, features." },
+                  { stage: "4", label: "Commissioning Check", desc: "Decommissioned device → pairing flow before anything else." },
+                  { stage: "5", label: "Firmware & Signal", desc: "Outdated firmware → ticket. Poor RSSI → flag and address first." },
+                  { stage: "6A", label: "Diagnose & Explain", desc: "Expert briefing: root cause, mechanism, contributing factors." },
+                  { stage: "6B", label: "KB Troubleshooting", desc: "Guide through KB steps one at a time. Feature-flag aware." },
+                  { stage: "7", label: "Graceful Close", desc: "Summary of what was done, what fixed it, and KB source link." },
+                ].map((item) => (
+                  <div key={item.stage} className="flex gap-2.5 bg-muted/30 border border-border/40 rounded-lg p-2.5">
+                    <div className="shrink-0 w-7 h-7 rounded-full bg-primary/10 text-primary flex items-center justify-center text-xs font-bold">
+                      {item.stage}
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-foreground leading-tight">{item.label}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{item.desc}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
