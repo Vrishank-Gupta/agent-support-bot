@@ -473,6 +473,8 @@ export function registerChatRoutes(app: Express): void {
     try {
       const { title } = req.body;
       const conversation = await chatStorage.createConversation(title || "New Chat");
+      // Initialise a clean state row so every new session starts at issue_extraction
+      await chatStorage.resetConversationState(conversation.id);
       res.status(201).json(conversation);
     } catch (error) {
       res.status(500).json({ error: "Failed to create conversation" });
@@ -486,6 +488,19 @@ export function registerChatRoutes(app: Express): void {
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: "Failed to delete conversation" });
+    }
+  });
+
+  // Reset a stuck session back to issue_extraction without losing message history
+  app.delete("/api/conversations/:id/state", async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const conversation = await chatStorage.getConversation(id);
+      if (!conversation) return res.status(404).json({ error: "Conversation not found" });
+      await chatStorage.resetConversationState(id);
+      res.json({ ok: true, message: "Session state reset to issue_extraction. Message history preserved." });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to reset session state" });
     }
   });
 
