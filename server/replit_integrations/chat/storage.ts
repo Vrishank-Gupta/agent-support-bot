@@ -1,8 +1,8 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import {
-  conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage, settings,
-  type InsertKnowledgeBase, type InsertWhitelistedUser
+  conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage, settings, conversationState,
+  type InsertKnowledgeBase, type InsertWhitelistedUser, type ConversationState,
 } from "@shared/schema";
 import { eq, desc, isNull } from "drizzle-orm";
 
@@ -38,6 +38,11 @@ export interface IChatStorage {
   // Settings
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
+
+  // Conversation State
+  getConversationState(conversationId: number): Promise<ConversationState | undefined>;
+  upsertConversationState(conversationId: number, updates: Partial<Omit<ConversationState, "conversationId" | "updatedAt">>): Promise<ConversationState>;
+  resetConversationState(conversationId: number): Promise<void>;
 }
 
 export const chatStorage: IChatStorage = {
@@ -171,5 +176,33 @@ export const chatStorage: IChatStorage = {
       .insert(settings)
       .values({ key, value, updatedAt: new Date() })
       .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } });
+  },
+
+  // ── Conversation State ─────────────────────────────
+  async getConversationState(conversationId: number) {
+    const [row] = await db
+      .select()
+      .from(conversationState)
+      .where(eq(conversationState.conversationId, conversationId));
+    return row;
+  },
+
+  async upsertConversationState(conversationId: number, updates: Partial<Omit<ConversationState, "conversationId" | "updatedAt">>) {
+    const now = new Date();
+    const [row] = await db
+      .insert(conversationState)
+      .values({ conversationId, ...updates, updatedAt: now })
+      .onConflictDoUpdate({
+        target: conversationState.conversationId,
+        set: { ...updates, updatedAt: now },
+      })
+      .returning();
+    return row;
+  },
+
+  async resetConversationState(conversationId: number) {
+    await db
+      .delete(conversationState)
+      .where(eq(conversationState.conversationId, conversationId));
   },
 };

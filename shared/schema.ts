@@ -57,12 +57,35 @@ export const settings = pgTable("settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const conversationState = pgTable("conversation_state", {
+  conversationId: integer("conversation_id").primaryKey().references(() => conversations.id, { onDelete: "cascade" }),
+  issue: text("issue"),
+  productCategory: text("product_category"),
+  modelNumber: text("model_number"),
+  srNumber: text("sr_number"),
+  accountEmail: text("account_email"),
+  identifierAvailable: boolean("identifier_available").default(false).notNull(),
+  appConnectionStatus: text("app_connection_status"), // "connected" | "disconnected" | "decommissioned"
+  signalStatus: text("signal_status"),               // "online" | "offline"
+  firmwareVersion: text("firmware_version"),
+  firmwareStatus: text("firmware_status"),           // "ok" | "outdated" | "unknown"
+  featuresEnabled: text("features_enabled").array().default([]).notNull(),
+  featuresDisabled: text("features_disabled").array().default([]).notNull(),
+  currentStage: text("current_stage").default("issue_extraction").notNull(),
+  troubleshootingIndex: integer("troubleshooting_index").default(0).notNull(),
+  kbOnlyMode: boolean("kb_only_mode").default(false).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ── Insert schemas ──────────────────────────────────────────────────────────
 export const insertConversationSchema = createInsertSchema(conversations).omit({ id: true, createdAt: true });
 export const insertMessageSchema = createInsertSchema(messages).omit({ id: true, createdAt: true });
 export const insertKnowledgeBaseSchema = createInsertSchema(knowledgeBase).omit({ id: true, updatedAt: true });
 export const insertWhitelistedUserSchema = createInsertSchema(whitelistedUsers).omit({ id: true, createdAt: true });
 export const insertTokenUsageSchema = createInsertSchema(tokenUsage).omit({ id: true, createdAt: true });
+export const insertConversationStateSchema = createInsertSchema(conversationState).omit({ updatedAt: true });
 
+// ── Select types ────────────────────────────────────────────────────────────
 export type Conversation = typeof conversations.$inferSelect;
 export type InsertConversation = z.infer<typeof insertConversationSchema>;
 export type Message = typeof messages.$inferSelect;
@@ -72,3 +95,5 @@ export type InsertKnowledgeBase = z.infer<typeof insertKnowledgeBaseSchema>;
 export type WhitelistedUser = typeof whitelistedUsers.$inferSelect;
 export type InsertWhitelistedUser = z.infer<typeof insertWhitelistedUserSchema>;
 export type TokenUsage = typeof tokenUsage.$inferSelect;
+export type ConversationState = typeof conversationState.$inferSelect;
+export type InsertConversationState = z.infer<typeof insertConversationStateSchema>;
