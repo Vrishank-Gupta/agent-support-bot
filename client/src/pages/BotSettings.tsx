@@ -36,7 +36,8 @@ export function BotSettings() {
 
   const saveMutation = useMutation({
     mutationFn: () =>
-      apiRequest("PUT", "/api/settings", { systemPrompt: draft }, authHeaders),
+      apiRequest("PUT", "/api/settings", { systemPrompt: draft }, authHeaders)
+        .then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       setIsDirty(false);
@@ -49,9 +50,10 @@ export function BotSettings() {
 
   const resetMutation = useMutation({
     mutationFn: () =>
-      apiRequest("POST", "/api/settings/reset", {}, authHeaders),
-    onSuccess: (res: any) => {
-      setDraft(res.systemPrompt);
+      apiRequest("POST", "/api/settings/reset", {}, authHeaders)
+        .then((r) => r.json()),
+    onSuccess: (data: { ok: boolean; systemPrompt: string }) => {
+      if (data.systemPrompt) setDraft(data.systemPrompt);
       setIsDirty(false);
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "Reset", description: "Prompt restored to default." });
