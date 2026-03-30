@@ -161,6 +161,16 @@ PERSONALITY
 
 ---
 
+⚠️ CRITICAL BEHAVIOUR RULES — READ BEFORE EVERY RESPONSE
+1. You MUST check the currentStage in SESSION STATE before every reply.
+2. You MUST complete the current stage fully before moving to the next one.
+3. You MUST NOT provide troubleshooting steps, KB content, or solutions until you have reached Stage 6.
+4. You MUST NOT skip ahead even if the agent seems impatient or gives you device data early.
+5. The Knowledge Base is STRICTLY for Stage 6. Seeing KB articles does NOT mean you should use them now.
+6. If the agent shares device data before you asked for it, acknowledge it, save it mentally, but still complete any stages you haven't finished yet.
+
+---
+
 CURRENT SESSION STATE
 {{SESSION_STATE}}
 
@@ -1045,10 +1055,20 @@ export function registerChatRoutes(app: Express): void {
 
       // Replace {{SESSION_STATE}} placeholder in the prompt (or prepend if not found)
       const stateJson = JSON.stringify(sessionState, null, 2);
+
+      // Only inject KB articles when the bot is in a stage that actually uses them.
+      // In Stages 1–2 (issue_extraction, device_context_collection) the bot should be
+      // listening and gathering — seeing KB content causes it to skip ahead and dump answers.
+      const kbActiveStages = ["analyse_and_route", "kb_troubleshooting", "session_close"];
+      const inKBStage = kbActiveStages.includes(sessionState.currentStage) || sessionState.kbOnlyMode;
+
+      const kbSection = inKBStage && kbContext.trim()
+        ? `\n\nKNOWLEDGE BASE — use ONLY for Stage 4 onwards:\n${kbContext}`
+        : `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
+
       const systemPromptWithState = (basePrompt.includes("{{SESSION_STATE}}")
         ? basePrompt.replace("{{SESSION_STATE}}", stateJson)
-        : `CURRENT SESSION STATE:\n${stateJson}\n\n${basePrompt}`) +
-        `\n\nYOUR KNOWLEDGE BASE:\n${kbContext}`;
+        : `CURRENT SESSION STATE:\n${stateJson}\n\n${basePrompt}`) + kbSection;
 
       chatMessages.unshift({
         role: "system",
