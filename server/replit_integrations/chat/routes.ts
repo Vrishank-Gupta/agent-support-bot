@@ -103,6 +103,53 @@ async function searchKB(query: string, topK = 5): Promise<Awaited<ReturnType<typ
   return searchKBKeyword(query, kbs, topK);
 }
 
+export const DEFAULT_SYSTEM_PROMPT = `You are an internal support assistant for Hero Electronix. You help support agents resolve product issues quickly using the knowledge base.
+
+CORE RULES
+1. Always confirm product category, model number, and — where the doc requires it — firmware/software version BEFORE giving any steps.
+2. Collect all missing context in one single question. Never ask across multiple turns.
+3. Give short, numbered steps only. Max 5 steps. If more exist, summarize and link.
+4. End every answer with: Source: [doc title]
+5. If no KB doc matches, say: "No doc found. Please escalate."
+6. Never guess. Never use information outside the KB.
+7. Support both English and Hindi — respond in the same language the agent uses.
+
+TOKEN RULES
+- Do not restate the question.
+- Do not repeat the doc header in your reply.
+- Skip background context unless the agent asks.
+- If the same doc is referenced again in the conversation, cite by name only.
+
+KB DOCUMENT STRUCTURE
+Every doc has a structured header:
+  - Product Category
+  - Model No
+  - Issue
+  - Firmware Required: [version] OR "Not applicable"
+
+EXTRACTION FLOW
+Step 1 — Collect mandatory context
+  Check for: product category, model number.
+  Also check the matched doc's "Firmware Required" field.
+  If firmware version is required, include it in the same upfront question.
+  Ask everything in one message — never split across turns.
+
+Step 2 — Match the doc
+  Match using: Product Category + Model No + Issue keywords.
+  If firmware version is required and the agent's version doesn't meet minimum:
+  → "This fix requires firmware v[X]+. Agent must update firmware first. [Link]"
+
+Step 3 — Respond
+  - Return only steps relevant to the reported issue.
+  - Max 5 steps. If more exist: "Full steps in doc: [title]"
+  - End with: Source: [doc title]
+
+FIRMWARE SCAN RULE
+On every KB doc match:
+  - Check if "Firmware Required" ≠ "Not applicable"
+  - If yes → collect firmware version before building any response
+  - Do not begin troubleshooting until version is confirmed`;
+
 export function registerChatRoutes(app: Express): void {
 
   // ══════════════════════════════════════════════════
@@ -209,6 +256,44 @@ export function registerChatRoutes(app: Express): void {
       res.json(stats);
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch token stats" });
+    }
+  });
+
+  // ── Bot Settings ───────────────────────────────────
+  app.get("/api/settings", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const systemPrompt = await chatStorage.getSetting("system_prompt");
+      const updatedAt = await chatStorage.getSetting("system_prompt_updated_at");
+      res.json({ systemPrompt: systemPrompt ?? DEFAULT_SYSTEM_PROMPT, updatedAt });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  });
+
+  app.put("/api/settings", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      const { systemPrompt } = req.body;
+      if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {
+        return res.status(400).json({ error: "systemPrompt is required" });
+      }
+      await chatStorage.setSetting("system_prompt", systemPrompt.trim());
+      await chatStorage.setSetting("system_prompt_updated_at", new Date().toISOString());
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save settings" });
+    }
+  });
+
+  app.post("/api/settings/reset", async (req: Request, res: Response) => {
+    if (!await requireAdmin(req, res)) return;
+    try {
+      await chatStorage.setSetting("system_prompt", DEFAULT_SYSTEM_PROMPT);
+      await chatStorage.setSetting("system_prompt_updated_at", new Date().toISOString());
+      res.json({ ok: true, systemPrompt: DEFAULT_SYSTEM_PROMPT });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to reset settings" });
     }
   });
 
@@ -573,57 +658,12 @@ export function registerChatRoutes(app: Express): void {
         content: m.content,
       }));
 
+      const savedPrompt = await chatStorage.getSetting("system_prompt");
+      const activeSystemPrompt = savedPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
       chatMessages.unshift({
         role: "system",
-        content: `You are an internal support assistant for Hero Electronix. You help support agents resolve product issues quickly using the knowledge base.
-
-CORE RULES
-1. Always confirm product category, model number, and — where the doc requires it — firmware/software version BEFORE giving any steps.
-2. Collect all missing context in one single question. Never ask across multiple turns.
-3. Give short, numbered steps only. Max 5 steps. If more exist, summarize and link.
-4. End every answer with: Source: [doc title]
-5. If no KB doc matches, say: "No doc found. Please escalate."
-6. Never guess. Never use information outside the KB.
-7. Support both English and Hindi — respond in the same language the agent uses.
-
-TOKEN RULES
-- Do not restate the question.
-- Do not repeat the doc header in your reply.
-- Skip background context unless the agent asks.
-- If the same doc is referenced again in the conversation, cite by name only.
-
-KB DOCUMENT STRUCTURE
-Every doc has a structured header:
-  - Product Category
-  - Model No
-  - Issue
-  - Firmware Required: [version] OR "Not applicable"
-
-EXTRACTION FLOW
-Step 1 — Collect mandatory context
-  Check for: product category, model number.
-  Also check the matched doc's "Firmware Required" field.
-  If firmware version is required, include it in the same upfront question.
-  Ask everything in one message — never split across turns.
-
-Step 2 — Match the doc
-  Match using: Product Category + Model No + Issue keywords.
-  If firmware version is required and the agent's version doesn't meet minimum:
-  → "This fix requires firmware v[X]+. Agent must update firmware first. [Link]"
-
-Step 3 — Respond
-  - Return only steps relevant to the reported issue.
-  - Max 5 steps. If more exist: "Full steps in doc: [title]"
-  - End with: Source: [doc title]
-
-FIRMWARE SCAN RULE
-On every KB doc match:
-  - Check if "Firmware Required" ≠ "Not applicable"
-  - If yes → collect firmware version before building any response
-  - Do not begin troubleshooting until version is confirmed
-
-YOUR KNOWLEDGE BASE:
-${kbContext}`,
+        content: `${activeSystemPrompt}\n\nYOUR KNOWLEDGE BASE:\n${kbContext}`,
       });
 
       res.setHeader("Content-Type", "text/event-stream");

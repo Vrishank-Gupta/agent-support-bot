@@ -1,7 +1,7 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import {
-  conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage,
+  conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage, settings,
   type InsertKnowledgeBase, type InsertWhitelistedUser
 } from "@shared/schema";
 import { eq, desc, isNull } from "drizzle-orm";
@@ -34,6 +34,10 @@ export interface IChatStorage {
   // Token usage
   recordTokenUsage(conversationId: number, messageId: number | null, promptTokens: number, completionTokens: number): Promise<void>;
   getTokenStats(): Promise<{ totalPrompt: number; totalCompletion: number; totalTokens: number; byConversation: { conversationId: number; total: number }[] }>;
+
+  // Settings
+  getSetting(key: string): Promise<string | null>;
+  setSetting(key: string, value: string): Promise<void>;
 }
 
 export const chatStorage: IChatStorage = {
@@ -154,5 +158,18 @@ export const chatStorage: IChatStorage = {
       .groupBy(tokenUsage.conversationId);
 
     return { ...totals, byConversation };
+  },
+
+  // ── Settings ──────────────────────────────────────
+  async getSetting(key: string) {
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    return row?.value ?? null;
+  },
+
+  async setSetting(key: string, value: string) {
+    await db
+      .insert(settings)
+      .values({ key, value, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } });
   },
 };

@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User } from "lucide-react";
+import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User, SlidersHorizontal } from "lucide-react";
 import { useConversations, useCreateConversation, useDeleteConversation } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
@@ -47,15 +47,27 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
         </Link>
 
         {isAdmin && (
-          <Link href="/admin">
-            <Button
-              variant="ghost"
-              className={`w-full justify-start gap-2 ${location === "/admin" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-            >
-              <ShieldCheck className="w-4 h-4" />
-              Admin Panel
-            </Button>
-          </Link>
+          <>
+            <Link href="/bot-settings">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start gap-2 ${location === "/bot-settings" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                data-testid="link-bot-settings"
+              >
+                <SlidersHorizontal className="w-4 h-4" />
+                Bot Settings
+              </Button>
+            </Link>
+            <Link href="/admin">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start gap-2 ${location === "/admin" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              >
+                <ShieldCheck className="w-4 h-4" />
+                Admin Panel
+              </Button>
+            </Link>
+          </>
         )}
       </div>
 

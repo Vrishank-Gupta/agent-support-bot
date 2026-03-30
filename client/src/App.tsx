@@ -7,6 +7,7 @@ import NotFound from "@/pages/not-found";
 import { Layout } from "@/pages/Layout";
 import { KBManager } from "@/pages/KBManager";
 import { AdminPanel } from "@/pages/AdminPanel";
+import { BotSettings } from "@/pages/BotSettings";
 import { UserProvider } from "@/lib/userContext";
 import { EmailGate } from "@/components/EmailGate";
 
@@ -18,6 +19,7 @@ function Router() {
         <Route path="/chat/:id" component={Layout} />
         <Route path="/kb" component={KBManager} />
         <Route path="/admin" component={AdminPanel} />
+        <Route path="/bot-settings" component={BotSettings} />
         <Route component={NotFound} />
       </Switch>
     </EmailGate>
