@@ -6,3 +6,9 @@ id = "Ph-5hRcSOtoZq38BgUv4q"
 uri = "file://replit.md"
 type = "text"
 title = "Customer Support AI Bot — Project Documentation"
+
+[[outputs]]
+id = "vwtGDTfU__UqEIAJL5GFp"
+uri = "file://hero-electronix-bot-system-prompt.md"
+type = "text"
+title = "Hero Electronix Bot — System Prompt"
