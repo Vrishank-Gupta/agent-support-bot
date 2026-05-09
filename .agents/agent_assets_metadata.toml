@@ -12,3 +12,9 @@ id = "vwtGDTfU__UqEIAJL5GFp"
 uri = "file://hero-electronix-bot-system-prompt.md"
 type = "text"
 title = "Hero Electronix Bot — System Prompt"
+
+[[outputs]]
+id = "jpTfrMAU1baUFWKqPBrjo"
+uri = "file://storage.ts.txt"
+type = "text"
+title = "storage.ts — Database access layer"
