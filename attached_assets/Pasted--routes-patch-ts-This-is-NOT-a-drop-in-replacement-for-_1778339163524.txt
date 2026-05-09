@@ -1,0 +1,106 @@
+/**
+ * routes.patch.ts
+ * ---------------
+ * This is NOT a drop-in replacement for routes.ts — your full routes.ts is too large
+ * to regenerate safely without seeing it. Instead apply the three targeted changes below.
+ *
+ * CHANGE 1 — Add import at the top of routes.ts
+ * CHANGE 2 — Replace DEFAULT_SYSTEM_PROMPT string constant
+ * CHANGE 3 — Replace the {{SESSION_STATE}} injection block
+ *
+ * Search for each marker comment and apply the change shown.
+ */
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE 1 — Add this import at the top of routes.ts
+// (alongside your other imports)
+// ─────────────────────────────────────────────────────────────
+
+import fs from "fs";
+import path from "path";
+import { serializeSessionState } from "./sessionState";
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE 2 — Replace the DEFAULT_SYSTEM_PROMPT constant
+//
+// FIND (the existing constant — looks like):
+//   const DEFAULT_SYSTEM_PROMPT = `You are a senior Qubo device expert...` (8,500 chars)
+//
+// REPLACE WITH:
+// ─────────────────────────────────────────────────────────────
+
+const DEFAULT_SYSTEM_PROMPT = fs.readFileSync(
+  path.join(__dirname, "../../system-prompt.md"),   // adjust path if needed
+  "utf-8"
+);
+
+/*
+ * NOTE ON FILE LOCATION:
+ * system-prompt.md should sit at: server/system-prompt.md
+ * The __dirname here is server/replit_integrations/chat/
+ * so ../../system-prompt.md resolves correctly.
+ *
+ * If Replit's build bundles files differently, use:
+ *   path.join(process.cwd(), "server/system-prompt.md")
+ */
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE 3 — Replace the {{SESSION_STATE}} injection block
+//
+// FIND (the existing block — looks like):
+//   const sessionState = {
+//     currentStage: state?.currentStage ?? "issue_extraction",
+//     issue: state?.issue ?? null,
+//     modelNumber: state?.modelNumber ?? null,
+//     // ... etc
+//   };
+//   const systemPromptWithState = basePrompt.replace(
+//     "{{SESSION_STATE}}",
+//     JSON.stringify(sessionState, null, 2)
+//   );
+//
+// REPLACE WITH:
+// ─────────────────────────────────────────────────────────────
+
+// Build full state object from DB (same as before — keep all your fields)
+const sessionState = {
+  currentStage: state?.currentStage ?? "issue_extraction",
+  kbOnlyMode: state?.kbOnlyMode ?? false,
+  issue: state?.issue ?? null,
+  productCategory: state?.productCategory ?? null,
+  srNumber: state?.srNumber ?? null,
+  accountEmail: state?.accountEmail ?? null,
+  deviceStatus: state?.deviceStatus ?? null,
+  commissioningStatus: state?.commissioningStatus ?? null,
+  softwareVersion: state?.softwareVersion ?? null,
+  lastOtaDate: state?.lastOtaDate ?? null,
+  rssi: state?.rssi ?? null,
+  disabledFeatures: state?.disabledFeatures ?? [],
+  modelNumber: state?.modelNumber ?? null,
+  firmwareOutdated: state?.firmwareOutdated ?? null,
+  signalWeak: state?.signalWeak ?? null,
+  kbDocTitle: state?.kbDocTitle ?? null,
+  kbDocLink: state?.kbDocLink ?? null,
+  currentKbStepIndex: state?.currentKbStepIndex ?? 0,
+  diagnosisBriefingDone: state?.diagnosisBriefingDone ?? false,
+};
+
+// ✅ Stage-gated serialization — only sends fields relevant to current stage
+const systemPromptWithState = basePrompt.replace(
+  "{{SESSION_STATE}}",
+  serializeSessionState(sessionState)  // replaces JSON.stringify(sessionState, null, 2)
+);
+
+// Everything after this stays the same — chatMessages.unshift({ role: "system", content: systemPromptWithState })
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE 4 — /api/settings/reset endpoint
+// No code change needed. Just call it after deploying.
+// It will read DEFAULT_SYSTEM_PROMPT (now from the .md file)
+// and push it to the DB, overwriting the old prompt.
+//
+// POST /api/settings/reset  →  pushes new prompt to DB
+// ─────────────────────────────────────────────────────────────
