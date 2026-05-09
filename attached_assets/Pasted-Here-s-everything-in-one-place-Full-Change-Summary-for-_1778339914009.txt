@@ -1,0 +1,94 @@
+Here's everything in one place:
+
+---
+
+## Full Change Summary for Replit
+
+### Files to upload (new files — no conflicts)
+
+| File | Upload to |
+|------|-----------|
+| `system-prompt.md` | `server/system-prompt.md` |
+| `sessionState.ts` | `server/replit_integrations/chat/sessionState.ts` |
+| `trimConversationHistory.ts` | `server/replit_integrations/chat/trimConversationHistory.ts` |
+
+---
+
+### Manual edits in `routes.ts`
+
+**1. Add imports at the top**
+```ts
+import fs from "fs";
+import path from "path";
+import { serializeSessionState } from "./sessionState";
+import { trimConversationHistory } from "./trimConversationHistory";
+```
+
+**2. Replace `DEFAULT_SYSTEM_PROMPT` constant**
+```ts
+const DEFAULT_SYSTEM_PROMPT = fs.readFileSync(
+  path.join(process.cwd(), "server/system-prompt.md"),
+  "utf-8"
+);
+```
+
+**3. Replace `JSON.stringify(sessionState, null, 2)` with**
+```ts
+serializeSessionState(sessionState)
+```
+
+**4. Add history trimming before the OpenAI call**
+```ts
+chatMessages = trimConversationHistory(chatMessages);
+```
+
+**5. Switch model — two lines, line 226 and line 967**
+```ts
+// FIND:
+model: "gpt-5.2"
+// REPLACE BOTH WITH:
+model: "gpt-4o-mini"
+```
+
+---
+
+### Manual edit in `storage.ts`
+
+**Fix orphaned state on conversation delete**
+```ts
+async deleteConversation(id: number) {
+  await db.delete(messages).where(eq(messages.conversationId, id));
+  await db.delete(conversationState).where(eq(conversationState.conversationId, id)); // ← add
+  await db.delete(tokenUsage).where(eq(tokenUsage.conversationId, id));               // ← add
+  await db.delete(conversations).where(eq(conversations.id, id));
+}
+```
+
+---
+
+### After deploying — one API call
+
+```
+POST /api/settings/reset
+```
+Pushes the new `system-prompt.md` into the database. Do this immediately after the app starts or the old prompt will still be served.
+
+---
+
+### What each change delivers
+
+| Change | Problem solved | Cost impact |
+|--------|---------------|-------------|
+| `system-prompt.md` | Contradictions, weak one-step rule, stray text, duplicate rules | −35% prompt tokens |
+| `sessionState.ts` | Full state JSON sent every turn regardless of stage | −20–30% per turn |
+| `trimConversationHistory.ts` | History grows unbounded on long sessions | Caps after turn 10 |
+| `gpt-4o-mini` | gpt-5.2 is 40–80x over the 5 paisa budget | ~₹1.5–3 per query |
+| `storage.ts` fix | Orphaned DB rows accumulate silently | Clean DB over time |
+
+---
+
+### Expected cost after all changes
+
+- Stages 1–5 turns: ~1–2 paisa
+- Stage 6 turns (KB injected): ~3–5 paisa
+- Session average: **2–3 paisa per turn** ✅

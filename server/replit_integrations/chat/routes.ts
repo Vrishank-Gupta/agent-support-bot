@@ -223,7 +223,7 @@ async function extractAndSaveState(
     });
 
     const extraction = await openai.chat.completions.create({
-      model: "gpt-5.2",
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
@@ -964,7 +964,7 @@ export function registerChatRoutes(app: Express): void {
       res.setHeader("Connection", "keep-alive");
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-5.2",
+        model: "gpt-4o-mini",
         messages: chatMessages as any,
         stream: true,
         stream_options: { include_usage: true },

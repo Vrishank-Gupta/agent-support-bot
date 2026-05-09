@@ -62,6 +62,8 @@ export const chatStorage: IChatStorage = {
 
   async deleteConversation(id: number) {
     await db.delete(messages).where(eq(messages.conversationId, id));
+    await db.delete(conversationState).where(eq(conversationState.conversationId, id));
+    await db.delete(tokenUsage).where(eq(tokenUsage.conversationId, id));
     await db.delete(conversations).where(eq(conversations.id, id));
   },
 
