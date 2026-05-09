@@ -1,0 +1,56 @@
+# pgvector Migration — KB Semantic Search
+Apply this AFTER the main qubo-fix package is deployed and working.
+
+## Why
+BM25 keyword search misses articles when the agent's words don't match KB titles.
+"screen keeps going black" won't find "Display Auto-Off Behaviour" — keywords don't overlap.
+pgvector understands meaning, not just keywords, so it finds the right article every time.
+
+## Files
+| File | Where it goes |
+|------|--------------|
+| `migration.sql` | Run in Replit PostgreSQL Shell (once) |
+| `kbSearch.ts` | `server/replit_integrations/chat/kbSearch.ts` |
+| `routes.patch-pgvector.ts` | Reference — apply 4 changes to routes.ts |
+
+---
+
+## Step-by-step
+
+### Step 1 — Run migration.sql
+In Replit, open the PostgreSQL shell and paste the contents of migration.sql.
+This adds the `embedding` column and creates the HNSW index. Takes ~5 seconds.
+
+### Step 2 — Upload kbSearch.ts
+Upload to `server/replit_integrations/chat/kbSearch.ts`. New file, no conflicts.
+
+### Step 3 — Edit routes.ts (4 changes)
+Open `routes.patch-pgvector.ts` and apply Changes A, B, C, D.
+- A: Add import at top
+- B: Replace your BM25 search call with `searchKB(...)`
+- C: Add `embedKBArticle(...)` after KB create/update
+- D: Add the `/api/kb/backfill` endpoint
+
+### Step 4 — Deploy and backfill
+After the app restarts, call once:
+  POST /api/kb/backfill
+
+This generates embeddings for all existing KB articles (~$0.001 total cost).
+Takes 1–2 minutes depending on how many articles you have.
+
+### Step 5 — Verify
+Check the admin panel token stats — KB injection tokens should drop by ~60%
+because you now get 3 targeted passages instead of 5 full articles.
+
+---
+
+## Cost of embedding
+- Embedding model: text-embedding-3-small
+- Cost per query: ~$0.000002 (less than 0.02 paisa per search)
+- One-time backfill of 100 articles: ~$0.001 total
+- Negligible — does not affect your 5 paisa per query budget
+
+## Fallback behaviour
+If pgvector is not yet set up or embeddings haven't been generated,
+kbSearch.ts automatically falls back to keyword-only search.
+The app will never crash due to missing embeddings.

@@ -1,0 +1,194 @@
+/**
+ * kbSearch.ts
+ * Drop into: server/replit_integrations/chat/
+ *
+ * Replaces BM25 keyword search with hybrid search:
+ *   - Semantic similarity via pgvector (finds conceptually similar articles
+ *     even when keywords don't match)
+ *   - BM25 keyword fallback (catches exact model numbers, error codes)
+ *   - Results merged and deduplicated
+ *
+ * Prerequisites (run once):
+ *   1. Enable pgvector:  CREATE EXTENSION IF NOT EXISTS vector;
+ *   2. Add embedding column to knowledge_base table (see migration.sql)
+ *   3. Set OPENAI_API_KEY in Replit Secrets (used to generate embeddings)
+ *
+ * Usage in routes.ts:
+ *   import { searchKB } from "./kbSearch";
+ *   const topArticles = await searchKB(query, { limit: 3 });
+ */
+
+import OpenAI from "openai";
+import { db } from "../../db";
+import { knowledgeBase } from "@shared/schema";
+import { sql } from "drizzle-orm";
+
+const openai = new OpenAI();
+
+/**
+ * Generate an embedding vector for a query string.
+ * Uses text-embedding-3-small — cheap (~$0.00002 per query) and fast.
+ */
+async function embedQuery(text: string): Promise<number[]> {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text.slice(0, 8000), // safety trim
+  });
+  return response.data[0].embedding;
+}
+
+export interface KBArticle {
+  id: number;
+  title: string;
+  content: string;
+  category: string | null;
+  score: number;
+}
+
+interface SearchOptions {
+  limit?: number;          // max articles to return (default: 3)
+  semanticWeight?: number; // 0–1, how much to weight semantic vs keyword (default: 0.7)
+}
+
+/**
+ * Hybrid KB search — semantic + keyword, merged and deduplicated.
+ * Falls back to keyword-only if embedding column is not yet populated.
+ */
+export async function searchKB(
+  query: string,
+  options: SearchOptions = {}
+): Promise<KBArticle[]> {
+  const limit = options.limit ?? 3;
+  const semanticWeight = options.semanticWeight ?? 0.7;
+  const keywordWeight = 1 - semanticWeight;
+
+  // ── Semantic search ───────────────────────────────────────────
+  let semanticResults: KBArticle[] = [];
+  try {
+    const queryEmbedding = await embedQuery(query);
+    const vectorLiteral = `[${queryEmbedding.join(",")}]`;
+
+    const rows = await db.execute(sql`
+      SELECT
+        id,
+        title,
+        content,
+        category,
+        1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
+      FROM knowledge_base
+      WHERE embedding IS NOT NULL
+      ORDER BY embedding <=> ${vectorLiteral}::vector
+      LIMIT ${limit * 2}
+    `);
+
+    semanticResults = (rows.rows as any[]).map((r) => ({
+      id: r.id,
+      title: r.title,
+      content: r.content,
+      category: r.category ?? null,
+      score: parseFloat(r.similarity) * semanticWeight,
+    }));
+  } catch (err) {
+    // pgvector not yet set up — silently fall through to keyword only
+    console.warn("[kbSearch] Semantic search unavailable, using keyword only:", err);
+  }
+
+  // ── Keyword search (BM25-style via PostgreSQL ts_rank) ────────
+  const keywordResults: KBArticle[] = [];
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        id,
+        title,
+        content,
+        category,
+        ts_rank(
+          to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, '')),
+          plainto_tsquery('english', ${query})
+        ) AS rank
+      FROM knowledge_base
+      WHERE
+        to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
+        @@ plainto_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit * 2}
+    `);
+
+    for (const r of rows.rows as any[]) {
+      keywordResults.push({
+        id: r.id,
+        title: r.title,
+        content: r.content,
+        category: r.category ?? null,
+        score: parseFloat(r.rank) * keywordWeight,
+      });
+    }
+  } catch (err) {
+    console.error("[kbSearch] Keyword search failed:", err);
+  }
+
+  // ── Merge and deduplicate ─────────────────────────────────────
+  const merged = new Map<number, KBArticle>();
+
+  for (const article of [...semanticResults, ...keywordResults]) {
+    if (merged.has(article.id)) {
+      // Already seen — add scores together (article appeared in both searches)
+      merged.get(article.id)!.score += article.score;
+    } else {
+      merged.set(article.id, { ...article });
+    }
+  }
+
+  return Array.from(merged.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+/**
+ * Generate and store an embedding for a single KB article.
+ * Call this when a KB article is created or updated.
+ * Your storage.ts already has getKBsWithoutEmbedding() — wire this up there.
+ */
+export async function embedKBArticle(
+  articleId: number,
+  title: string,
+  content: string
+): Promise<void> {
+  const text = `${title}\n\n${content}`.slice(0, 8000);
+  const embedding = await embedQuery(text);
+  const vectorLiteral = `[${embedding.join(",")}]`;
+
+  await db.execute(sql`
+    UPDATE knowledge_base
+    SET embedding = ${vectorLiteral}::vector
+    WHERE id = ${articleId}
+  `);
+}
+
+/**
+ * Backfill embeddings for all KB articles that don't have one yet.
+ * Call once after running migration.sql, then again whenever new articles are added.
+ * Safe to call multiple times — skips already-embedded articles.
+ */
+export async function backfillEmbeddings(): Promise<{ processed: number; errors: number }> {
+  const rows = await db.execute(sql`
+    SELECT id, title, content FROM knowledge_base WHERE embedding IS NULL
+  `);
+
+  let processed = 0;
+  let errors = 0;
+
+  for (const row of rows.rows as any[]) {
+    try {
+      await embedKBArticle(row.id, row.title, row.content);
+      processed++;
+      // Small delay to avoid hitting OpenAI rate limits
+      await new Promise((r) => setTimeout(r, 200));
+    } catch (err) {
+      console.error(`[backfill] Failed for article ${row.id}:`, err);
+      errors++;
+    }
+  }
+
+  return { processed, errors };
+}

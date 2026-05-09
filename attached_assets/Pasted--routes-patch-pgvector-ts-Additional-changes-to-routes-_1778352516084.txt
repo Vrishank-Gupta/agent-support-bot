@@ -1,0 +1,93 @@
+/**
+ * routes.patch-pgvector.ts
+ * -------------------------
+ * Additional changes to routes.ts for pgvector migration.
+ * Apply AFTER the main routes.patch.ts changes.
+ *
+ * CHANGE A — Import kbSearch
+ * CHANGE B — Replace BM25 search call with hybrid search
+ * CHANGE C — Auto-embed KB articles on create/update
+ * CHANGE D — Add backfill endpoint
+ */
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE A — Add import at top of routes.ts
+// ─────────────────────────────────────────────────────────────
+import { searchKB, embedKBArticle, backfillEmbeddings } from "./kbSearch";
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE B — Replace BM25 search with hybrid search
+//
+// FIND your existing BM25 block — looks something like:
+//   const topArticles = performBM25Search(allKBArticles, userMessage, 5);
+//   (or however your BM25 is called)
+//
+// REPLACE WITH:
+// ─────────────────────────────────────────────────────────────
+
+// Build search query from issue + model number for best retrieval
+const searchQuery = [
+  sessionState.issue,
+  sessionState.modelNumber,
+  sessionState.productCategory,
+  userMessage, // the agent's current message
+]
+  .filter(Boolean)
+  .join(" ");
+
+// Hybrid search — semantic + keyword, top 3 articles
+const topArticles = await searchKB(searchQuery, { limit: 3 });
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE C — Auto-embed on KB create/update
+//
+// FIND your POST /api/kb route (creates a new KB article)
+// AFTER the createKB call, ADD:
+// ─────────────────────────────────────────────────────────────
+
+// After: const newKb = await chatStorage.createKB(kbData);
+// Add:
+try {
+  await embedKBArticle(newKb.id, newKb.title, newKb.content);
+} catch (err) {
+  console.error("[KB] Failed to embed new article:", err);
+  // Non-fatal — article saved, embedding can be backfilled later
+}
+
+// Similarly for your PUT /api/kb/:id route (updates existing article):
+// After: const updated = await chatStorage.updateKB(id, kbData);
+// Add:
+try {
+  await embedKBArticle(updated.id, updated.title, updated.content);
+} catch (err) {
+  console.error("[KB] Failed to re-embed updated article:", err);
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE D — Add backfill endpoint
+// Add this as a new route in routes.ts:
+// ─────────────────────────────────────────────────────────────
+
+// POST /api/kb/backfill
+// Generates embeddings for all KB articles that don't have one yet.
+// Call once after running migration.sql, then again if you add many articles at once.
+app.post("/api/kb/backfill", async (req, res) => {
+  try {
+    console.log("[backfill] Starting KB embedding backfill...");
+    const result = await backfillEmbeddings();
+    console.log(`[backfill] Done. Processed: ${result.processed}, Errors: ${result.errors}`);
+    res.json({
+      success: true,
+      processed: result.processed,
+      errors: result.errors,
+      message: `Embedded ${result.processed} articles. ${result.errors} errors.`,
+    });
+  } catch (err) {
+    console.error("[backfill] Fatal error:", err);
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
