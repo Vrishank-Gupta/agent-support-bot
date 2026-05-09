@@ -172,15 +172,30 @@ export function KBManager() {
   });
 
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
+  const [spExpiredOpen, setSpExpiredOpen] = useState(false);
+  const [importTab, setImportTab] = useState("file");
+  const importCardRef = useRef<HTMLDivElement>(null);
 
   const handleRefreshKB = async (id: number) => {
     setRefreshingId(id);
     try {
       await apiRequest("POST", `/api/kb/${id}/refresh`, {});
       await queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
-      toast({ title: "KB entry refreshed", description: "Content has been pulled fresh from OneDrive." });
+      toast({ title: "KB entry refreshed", description: "Content has been pulled fresh from SharePoint." });
     } catch (err: any) {
-      toast({ title: "Refresh failed", description: err?.message || "Could not refresh this entry.", variant: "destructive" });
+      // Parse the JSON body from "503: {...}" error strings
+      let code = "refresh_failed";
+      try {
+        const jsonPart = err?.message?.replace(/^\d+:\s*/, "");
+        const parsed = JSON.parse(jsonPart);
+        code = parsed?.code ?? code;
+      } catch { /* not JSON — ignore */ }
+
+      if (code === "sharepoint_expired") {
+        setSpExpiredOpen(true);
+      } else {
+        toast({ title: "Refresh failed", description: err?.message || "Could not refresh this entry.", variant: "destructive" });
+      }
     } finally {
       setRefreshingId(null);
     }
@@ -413,9 +428,35 @@ export function KBManager() {
 
         <div className="p-8 max-w-5xl mx-auto w-full space-y-8">
 
+          {/* ── SharePoint session expired dialog ── */}
+          <Dialog open={spExpiredOpen} onOpenChange={setSpExpiredOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-amber-500" />
+                  SharePoint Session Expired
+                </DialogTitle>
+              </DialogHeader>
+              <div className="text-sm text-muted-foreground space-y-2 py-1">
+                <p>The automatic refresh couldn't reconnect to SharePoint — the session token has expired.</p>
+                <p>To update this file's content, paste the original SharePoint sharing link into the <strong>OneDrive URL</strong> import tab below. That will pull a fresh copy and update the KB entry.</p>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="outline" onClick={() => setSpExpiredOpen(false)}>Close</Button>
+                <Button onClick={() => {
+                  setSpExpiredOpen(false);
+                  setImportTab("url");
+                  setTimeout(() => importCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+                }}>
+                  Open Import Tab
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           {/* ── Upload zone ── */}
           {canAddKB && (
-            <Card>
+            <Card ref={importCardRef}>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Cloud className="w-5 h-5 text-blue-500" />
@@ -423,7 +464,7 @@ export function KBManager() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <Tabs defaultValue="file">
+                <Tabs value={importTab} onValueChange={setImportTab}>
                   <TabsList className="mb-4">
                     <TabsTrigger value="file" className="gap-2"><Upload className="w-3.5 h-3.5" /> Upload File</TabsTrigger>
                     <TabsTrigger value="url" className="gap-2"><Link2 className="w-3.5 h-3.5" /> OneDrive URL</TabsTrigger>

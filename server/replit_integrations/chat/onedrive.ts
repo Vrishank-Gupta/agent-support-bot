@@ -278,28 +278,66 @@ function siteBaseFromSharingUrl(sharingUrl: string): string {
 }
 
 /**
- * Single-trip helper: visits the sharing URL with redirect:manual,
- * returns the FedAuth cookie AND the redirect location together.
+ * Follows the full SharePoint redirect chain (up to 8 hops) with redirect:manual,
+ * accumulating all Set-Cookie values. Returns the first FedAuth cookie found
+ * and the redirect location that contained it (or the last location seen).
+ *
+ * SharePoint sometimes sets FedAuth on hop 2 or 3 — a single-hop fetch misses it.
  */
 async function fetchShareRedirect(sharingUrl: string): Promise<{ cookie: string; location: string }> {
-  const res = await fetch(sharingUrl, {
-    redirect: "manual",
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-  });
-  const cookieHeader = res.headers.get("set-cookie") || "";
-  const cookie = cookieHeader.split(";")[0].trim();
-  const location = res.headers.get("location") || "";
-  return { cookie, location };
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  };
+
+  let nextUrl: string = sharingUrl;
+  const cookieJar: string[] = [];     // accumulate all cookies across hops
+  let lastLocation = "";
+
+  for (let hop = 0; hop < 8; hop++) {
+    const res = await fetch(nextUrl, { redirect: "manual", headers });
+
+    // Collect all cookies from this hop
+    const raw = res.headers.get("set-cookie") || "";
+    if (raw) {
+      // set-cookie may be a comma-separated list of multiple cookies
+      raw.split(/,(?=[^ ])/).forEach(c => {
+        const pair = c.split(";")[0].trim();
+        if (pair) cookieJar.push(pair);
+      });
+    }
+
+    // If we now have a FedAuth cookie, we're done — return it
+    const fedAuth = cookieJar.find(c => c.startsWith("FedAuth="));
+    if (fedAuth) {
+      // Also include rtFa if present (SharePoint sometimes requires both)
+      const rtFa = cookieJar.find(c => c.startsWith("rtFa="));
+      const cookie = [fedAuth, rtFa].filter(Boolean).join("; ");
+      return { cookie, location: lastLocation || res.headers.get("location") || "" };
+    }
+
+    const location = res.headers.get("location") || "";
+    if (!location) break;   // no more redirects
+    lastLocation = location;
+
+    // Resolve relative redirects
+    try {
+      nextUrl = new URL(location, nextUrl).href;
+    } catch {
+      nextUrl = location;
+    }
+  }
+
+  // No FedAuth found — return whatever we accumulated (may be empty, caller will throw)
+  const cookie = cookieJar.join("; ");
+  return { cookie, location: lastLocation };
 }
 
 /** List all files in a shared folder using FedAuth cookie + SharePoint REST API (2 HTTP calls total) */
 export async function listSharedFolder(sharingUrl: string): Promise<SharingLinkItem[]> {
   const { cookie, location } = await fetchShareRedirect(sharingUrl);
-  if (!cookie) throw new Error("No FedAuth cookie returned. Make sure the link is shared as 'Anyone with the link'.");
-  if (!location) throw new Error("SharePoint sharing link did not redirect. The link may have expired.");
+  if (!cookie) throw new Error("SharePoint session expired. Please re-import the file from the KB Manager → Import from SharePoint tab using a fresh sharing link.");
+  if (!location) throw new Error("SharePoint sharing link did not redirect — the link may have expired. Please generate a new sharing link.");
 
   // Parse personal site path and folder path from the redirect location
   const personalMatch = location.match(/\/personal\/[^/?]+/);

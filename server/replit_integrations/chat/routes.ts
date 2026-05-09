@@ -848,7 +848,14 @@ export function registerChatRoutes(app: Express): void {
       res.json({ ...updated, refreshed: true });
     } catch (err: any) {
       console.error("KB refresh error:", err.message);
-      res.status(500).json({ error: err.message });
+      const isExpired = err.message?.toLowerCase().includes("session expired") ||
+                        err.message?.toLowerCase().includes("fedauth") ||
+                        err.message?.toLowerCase().includes("expired");
+      const status = isExpired ? 503 : 500;
+      res.status(status).json({
+        error: err.message,
+        code: isExpired ? "sharepoint_expired" : "refresh_failed",
+      });
     }
   });
 
