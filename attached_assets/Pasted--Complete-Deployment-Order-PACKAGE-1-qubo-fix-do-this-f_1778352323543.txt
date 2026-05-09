@@ -1,0 +1,61 @@
+# Complete Deployment Order
+
+## PACKAGE 1 — qubo-fix (do this first)
+
+### Files to upload
+| File | Upload to |
+|------|-----------|
+| `system-prompt.md` | `server/system-prompt.md` |
+| `server/replit_integrations/chat/sessionState.ts` | `server/replit_integrations/chat/sessionState.ts` |
+| `server/replit_integrations/chat/trimConversationHistory.ts` | `server/replit_integrations/chat/trimConversationHistory.ts` |
+
+### Manual edits in routes.ts (open routes.patch.ts for exact code)
+1. Add 4 imports at the top
+2. Replace DEFAULT_SYSTEM_PROMPT with fs.readFileSync(...)
+3. Add 3 new fields to sessionState object (kbArticlesFound, kbStepTotal, keep currentKbStepIndex)
+4. Replace JSON.stringify(sessionState) with serializeSessionState(sessionState)
+5. Add structured KB injection (indexed articles with header)
+6. Add hallucination guard block before OpenAI call
+7. Add step index increment after assistant response
+8. Add trimConversationHistory(chatMessages) before chatMessages.unshift(...)
+9. Change BOTH model strings from "gpt-5.2" to "gpt-4o-mini"
+
+### Manual edit in storage.ts
+Add 2 lines to deleteConversation (see routes.patch.ts CHANGE 9)
+
+### After deploying
+POST /api/settings/reset    ← pushes new system-prompt.md to database
+
+---
+
+## PACKAGE 2 — qubo-fix-pgvector (do this second, after Package 1 is stable)
+
+### Run in PostgreSQL shell
+Execute migration.sql
+
+### Files to upload
+| File | Upload to |
+|------|-----------|
+| `server/replit_integrations/chat/kbSearch.ts` | `server/replit_integrations/chat/kbSearch.ts` |
+
+### Manual edits in routes.ts (open routes.patch-pgvector.ts for exact code)
+A. Add kbSearch import
+B. Replace BM25 search call with searchKB(...)
+C. Add embedKBArticle(...) after KB create and update
+D. Add POST /api/kb/backfill endpoint
+
+### After deploying
+POST /api/kb/backfill    ← generates embeddings for all existing KB articles (run once)
+
+---
+
+## What each package fixes
+
+| Issue | Fixed in |
+|-------|---------|
+| Bot gives multiple instructions at once | Package 1 — system-prompt.md |
+| Bot ignores KB order | Package 1 — system-prompt.md + routes.patch CHANGE 4+6 |
+| Bot hallucinates when no KB found | Package 1 — routes.patch CHANGE 5 |
+| Token cost too high | Package 1 — model switch + trimming + stage-gated state |
+| KB keyword mismatch (wrong/no articles retrieved) | Package 2 — pgvector hybrid search |
+| Orphaned DB rows | Package 1 — storage.ts fix |
