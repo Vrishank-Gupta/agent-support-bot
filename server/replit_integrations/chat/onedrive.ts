@@ -3,10 +3,10 @@
  * Uses client credentials flow — requires MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET.
  */
 
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const mammoth = require("mammoth");
-const pdfParse = require("pdf-parse");
+import * as mammoth from "mammoth";
+import * as pdfParseLib from "pdf-parse";
+// CJS interop: pdf-parse exports the function as default or as the module itself
+const pdfParse = (pdfParseLib as any).default ?? (pdfParseLib as any);
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 

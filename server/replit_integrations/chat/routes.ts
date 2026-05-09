@@ -1,7 +1,6 @@
 import type { Express, Request, Response } from "express";
 import OpenAI from "openai";
 import multer from "multer";
-import { createRequire } from "module";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -12,10 +11,11 @@ import { serializeSessionState } from "./sessionState";
 import { trimConversationHistory } from "./trimConversationHistory";
 import { searchKB as hybridSearchKB, buildKBQuery, embedKBArticle, backfillEmbeddings } from "./kbSearch";
 import type { FullSessionState } from "./sessionState";
-const require = createRequire(import.meta.url);
-const pdf = require("pdf-parse");
-const mammoth = require("mammoth");
-const XLSX = require("xlsx");
+import * as pdfParseLib from "pdf-parse";
+import * as mammoth from "mammoth";
+import * as XLSX from "xlsx";
+// CJS interop: pdf-parse exports the function as default or as the module itself
+const pdf = (pdfParseLib as any).default ?? (pdfParseLib as any);
 import { chatStorage } from "./storage";
 import type { ConversationState } from "@shared/schema";
 import {

@@ -16,6 +16,7 @@ const allowlist = [
   "express-rate-limit",
   "express-session",
   "jsonwebtoken",
+  "mammoth",
   "memorystore",
   "multer",
   "nanoid",
@@ -55,6 +56,7 @@ async function buildAll() {
     define: {
       "process.env.NODE_ENV": '"production"',
     },
+    conditions: ["require", "node", "default"],
     minify: true,
     external: externals,
     logLevel: "info",
