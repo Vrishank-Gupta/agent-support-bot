@@ -119,7 +119,7 @@ export function ChatView() {
               key={msg.id}
               role={msg.role as "user" | "assistant"}
               content={msg.content}
-              sources={msg.sources}
+              sources={msg.sources ?? undefined}
               createdAt={msg.createdAt}
             />
           ))}

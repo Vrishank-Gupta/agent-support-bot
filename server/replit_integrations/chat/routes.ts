@@ -260,7 +260,9 @@ Valid field names and types:
 
 Rules:
 - Advance currentStage only when the assistant has explicitly completed that stage's goal.
-- Never skip a stage. Never go backwards.
+- EXCEPTION: If kbOnlyMode becomes true (SR/email not available), set currentStage to "diagnose_troubleshoot" immediately — skip device_settings_collection, commissioning_check, firmware_signal_check entirely.
+- If kbOnlyMode is already true, never set currentStage to device_settings_collection, commissioning_check, or firmware_signal_check.
+- Never go backwards.
 - If unsure whether a stage is complete, keep the current stage.
 
 Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanation.`,
@@ -363,7 +365,7 @@ export function registerChatRoutes(app: Express): void {
   app.patch("/api/admin/users/:id", async (req: Request, res: Response) => {
     if (!await requireAdmin(req, res)) return;
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const { name, role, canAddKB } = req.body;
       const user = await chatStorage.updateUser(id, { name, role, canAddKB });
       res.json(user);
@@ -376,7 +378,7 @@ export function registerChatRoutes(app: Express): void {
   app.delete("/api/admin/users/:id", async (req: Request, res: Response) => {
     if (!await requireAdmin(req, res)) return;
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       await chatStorage.deleteUser(id);
       res.status(204).send();
     } catch (error) {
@@ -449,7 +451,7 @@ export function registerChatRoutes(app: Express): void {
 
   app.get("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const conversation = await chatStorage.getConversation(id);
       if (!conversation) return res.status(404).json({ error: "Conversation not found" });
       const messages = await chatStorage.getMessagesByConversation(id);
@@ -473,7 +475,7 @@ export function registerChatRoutes(app: Express): void {
 
   app.delete("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       await chatStorage.deleteConversation(id);
       res.status(204).send();
     } catch (error) {
@@ -484,7 +486,7 @@ export function registerChatRoutes(app: Express): void {
   // Reset a stuck session back to issue_extraction without losing message history
   app.delete("/api/conversations/:id/state", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const conversation = await chatStorage.getConversation(id);
       if (!conversation) return res.status(404).json({ error: "Conversation not found" });
       await chatStorage.resetConversationState(id);
@@ -775,7 +777,7 @@ export function registerChatRoutes(app: Express): void {
 
   app.patch("/api/kb/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const kb = await chatStorage.updateKB(id, req.body);
       embedKB(kb.id, kb.title, kb.content); // re-embed on content change
       res.json(kb);
@@ -862,7 +864,7 @@ export function registerChatRoutes(app: Express): void {
       }
 
       // 2. Remove KB entries whose files no longer exist in SharePoint
-      for (const [filename, kb] of kbByFilename) {
+      for (const [filename, kb] of Array.from(kbByFilename.entries())) {
         if (!spFilenames.has(filename)) {
           try {
             await chatStorage.deleteKB(kb.id);
@@ -886,7 +888,7 @@ export function registerChatRoutes(app: Express): void {
 
   app.delete("/api/kb/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       await chatStorage.deleteKB(id);
       res.status(204).send();
     } catch (error) {
@@ -897,7 +899,7 @@ export function registerChatRoutes(app: Express): void {
   // Refresh a KB entry from its original OneDrive source URL
   app.post("/api/kb/:id/refresh", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const kb = await chatStorage.getKB(id);
       if (!kb) return res.status(404).json({ error: "KB entry not found" });
       if (!kb.sourceUrl) return res.status(400).json({ error: "No source URL stored for this entry. Only OneDrive-imported entries can be refreshed." });
@@ -959,7 +961,7 @@ export function registerChatRoutes(app: Express): void {
 
   app.post("/api/conversations/:id/messages", async (req: Request, res: Response) => {
     try {
-      const conversationId = parseInt(req.params.id);
+      const conversationId = parseInt(req.params.id as string);
       const { content, attachmentIds } = req.body;
 
       // Resolve any uploaded attachments
@@ -1116,8 +1118,8 @@ export function registerChatRoutes(app: Express): void {
 
       // Stage-gated state serialization — only sends fields relevant to current stage (~30% token saving)
       const systemPromptWithState = (basePrompt.includes("{{SESSION_STATE}}")
-        ? basePrompt.replace("{{SESSION_STATE}}", serializeSessionState(sessionState))
-        : `CURRENT SESSION STATE:\n${serializeSessionState(sessionState)}\n\n${basePrompt}`) + kbSection;
+        ? basePrompt.replace("{{SESSION_STATE}}", serializeSessionState(sessionState as Partial<FullSessionState>))
+        : `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}\n\n${basePrompt}`) + kbSection;
 
       // Trim history to cap token growth on long sessions (keeps last 6 turns verbatim)
       chatMessages = trimConversationHistory(chatMessages as any) as typeof chatMessages;

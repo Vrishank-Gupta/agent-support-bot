@@ -396,11 +396,11 @@ export function KBManager() {
       let data: { files: OdFileItem[] };
       if (odUrlType === "sharing-folder") {
         const res = await apiRequest("POST", "/api/onedrive/browse-shared", { url: odUrl });
-        data = res as { files: OdFileItem[] };
+        data = await res.json() as { files: OdFileItem[] };
       } else {
         const res = await apiRequest("POST", "/api/onedrive/browse", { url: odUrl });
-        data = res as { files: OdFileItem[]; parsed: { upn: string; drivePath: string } };
-        setOdUpn((res as any).parsed?.upn || "");
+        data = await res.json() as { files: OdFileItem[]; parsed: { upn: string; drivePath: string } };
+        setOdUpn((data as any).parsed?.upn || "");
       }
       setOdFiles((data.files || []).filter(f => !f.isFolder));
       setOdBrowseStatus("done");
