@@ -100,7 +100,7 @@ export async function searchKB(
 
     const rows = await db.execute(sql`
       SELECT
-        id, title, content, category, source_url,
+        id, title, content, type as category, source_url,
         1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
       FROM knowledge_base
       WHERE embedding IS NOT NULL
@@ -125,7 +125,7 @@ export async function searchKB(
   try {
     const rows = await db.execute(sql`
       SELECT
-        id, title, content, category, source_url,
+        id, title, content, type as category, source_url,
         ts_rank(
           to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, '')),
           plainto_tsquery('english', ${query})

@@ -806,6 +806,51 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
+  // ── Sync all KB entries from the stored SharePoint master link ──
+  app.post("/api/kb/sync-sharepoint", async (req: Request, res: Response) => {
+    const isAdmin = await requireAdmin(req, res);
+    if (!isAdmin) return;
+
+    const masterLink = await chatStorage.getSetting("sharepoint_master_link");
+    if (!masterLink) return res.status(400).json({ error: "No SharePoint master link configured. Save one first." });
+
+    try {
+      const files = await listSharedFolder(masterLink);
+      const allKBs = await chatStorage.getAllKB();
+
+      const kbByFilename = new Map<string, typeof allKBs[0]>();
+      for (const kb of allKBs) {
+        const name = kb.title.replace(/^OneDrive:\s*/i, "").trim().toLowerCase();
+        kbByFilename.set(name, kb);
+      }
+
+      const results = { updated: 0, newFiles: [] as string[], errors: [] as string[] };
+
+      for (const file of files) {
+        const normalised = file.name.toLowerCase();
+        const existing = kbByFilename.get(normalised);
+        if (!existing) { results.newFiles.push(file.name); continue; }
+        try {
+          const newContent = await extractSharedFileContent(file);
+          if (!newContent.trim()) { results.errors.push(`${file.name}: empty content`); continue; }
+          const updated = await chatStorage.updateKB(existing.id, { content: newContent.trim() });
+          embedKB(existing.id, updated.title, updated.content);
+          results.updated++;
+        } catch (err: any) {
+          results.errors.push(`${file.name}: ${err.message}`);
+        }
+      }
+
+      res.json({ ok: true, ...results, total: files.length });
+    } catch (err: any) {
+      const isExpired = err.message?.toLowerCase().includes("expired") || err.message?.toLowerCase().includes("fedauth");
+      res.status(isExpired ? 503 : 500).json({
+        error: err.message,
+        code: isExpired ? "sharepoint_expired" : "sync_failed",
+      });
+    }
+  });
+
   app.delete("/api/kb/:id", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
@@ -860,6 +905,21 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
+  // ── SharePoint master link settings ──────────────────────────
+  app.get("/api/settings/sharepoint-master-link", async (req: Request, res: Response) => {
+    const link = await chatStorage.getSetting("sharepoint_master_link");
+    res.json({ link: link ?? "" });
+  });
+
+  app.put("/api/settings/sharepoint-master-link", async (req: Request, res: Response) => {
+    const isAdmin = await requireAdmin(req, res);
+    if (!isAdmin) return;
+    const { link } = req.body;
+    if (!link || typeof link !== "string") return res.status(400).json({ error: "link required" });
+    await chatStorage.setSetting("sharepoint_master_link", link.trim());
+    res.json({ ok: true, link: link.trim() });
+  });
+
   // ══════════════════════════════════════════════════
   // CHAT (SSE streaming)
   // ══════════════════════════════════════════════════
@@ -904,6 +964,25 @@ export function registerChatRoutes(app: Express): void {
         : 0;
 
       const messages = await chatStorage.getMessagesByConversation(conversationId);
+
+      // Auto-name conversation from first user message
+      if (messages.length === 1 && messages[0].role === "user") {
+        const raw = (content || attachments.map(a => a.filename).join(", ") || "").trim();
+        if (raw) {
+          const words = raw.replace(/\s+/g, " ").split(" ");
+          let title = "";
+          for (const w of words) {
+            if ((title + " " + w).trim().length > 48) break;
+            title = (title + " " + w).trim();
+          }
+          if (title.length < raw.length) title += "…";
+          const conv = await chatStorage.getConversation(conversationId);
+          if (conv && conv.title === "New Support Session") {
+            await chatStorage.updateConversationTitle(conversationId, title.charAt(0).toUpperCase() + title.slice(1));
+          }
+        }
+      }
+
       // Build chat messages — use multimodal content for the last user message if attachments exist
       let chatMessages: Array<{ role: "user" | "assistant" | "system"; content: any }> = messages.map((m, idx) => {
         const isLastUserMsg = idx === messages.length - 1 && m.role === "user" && attachments.length > 0;
@@ -988,7 +1067,7 @@ export function registerChatRoutes(app: Express): void {
       if (!inKBStage) {
         kbSection = `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
       } else if (!kbArticlesFound) {
-        kbSection = `\n\nKNOWLEDGE BASE: No articles found for this query.\n(kbArticlesFound = false — follow Stage 6B rules: do NOT improvise steps.)`;
+        kbSection = `\n\nKNOWLEDGE BASE: No exact articles found for this query.\n(kbArticlesFound = false — use your best expert knowledge about Qubo devices to give a helpful possible answer. Never refuse or say you cannot help.)`;
       } else {
         kbSection = [
           `\n\nRETRIEVED KB ARTICLES — FOLLOW THESE EXACTLY IN ORDER`,

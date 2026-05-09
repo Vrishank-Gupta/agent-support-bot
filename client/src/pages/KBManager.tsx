@@ -12,7 +12,7 @@ import { Sidebar } from "@/components/Sidebar";
 import {
   Plus, Trash2, Edit2, Save, X, Upload, FileText, Cloud,
   CheckCircle2, AlertCircle, Loader2, ExternalLink, BookOpen, Tag, Link2, Lock,
-  Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2, RotateCcw
+  Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2, RotateCcw, RefreshCcw
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/lib/userContext";
@@ -176,6 +176,56 @@ export function KBManager() {
   const [importTab, setImportTab] = useState("file");
   const importCardRef = useRef<HTMLDivElement>(null);
 
+  // SharePoint master link sync state
+  const [spMasterLink, setSpMasterLink] = useState("");
+  const [spMasterLinkDraft, setSpMasterLinkDraft] = useState("");
+  const [spLinkSaving, setSpLinkSaving] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
+  const [syncResult, setSyncResult] = useState<{
+    updated: number; newFiles: string[]; errors: string[]; total: number;
+  } | null>(null);
+  const [syncError, setSyncError] = useState("");
+
+  // Load stored master link on mount
+  const { data: spLinkData } = useQuery<{ link: string }>({ queryKey: ["/api/settings/sharepoint-master-link"] });
+
+  const handleSaveMasterLink = async () => {
+    if (!spMasterLinkDraft.trim()) return;
+    setSpLinkSaving(true);
+    try {
+      const email = localStorage.getItem("userEmail") || "";
+      await apiRequest("PUT", "/api/settings/sharepoint-master-link", { link: spMasterLinkDraft.trim() });
+      setSpMasterLink(spMasterLinkDraft.trim());
+      queryClient.invalidateQueries({ queryKey: ["/api/settings/sharepoint-master-link"] });
+      toast({ title: "Master link saved" });
+    } catch (err: any) {
+      toast({ title: "Save failed", description: err?.message, variant: "destructive" });
+    } finally {
+      setSpLinkSaving(false);
+    }
+  };
+
+  const handleSyncSharePoint = async () => {
+    setSyncStatus("syncing");
+    setSyncResult(null);
+    setSyncError("");
+    try {
+      const result = await apiRequest("POST", "/api/kb/sync-sharepoint", {}) as unknown as {
+        updated: number; newFiles: string[]; errors: string[]; total: number;
+      };
+      setSyncResult(result);
+      setSyncStatus("done");
+      queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
+      toast({ title: `Sync complete — ${result.updated} KB entries updated` });
+    } catch (err: any) {
+      let msg = err?.message || "Sync failed";
+      try { const j = JSON.parse(msg.replace(/^\d+:\s*/, "")); msg = j?.error || msg; } catch { /* noop */ }
+      setSyncError(msg);
+      setSyncStatus("error");
+      toast({ title: "Sync failed", description: msg, variant: "destructive" });
+    }
+  };
+
   const handleRefreshKB = async (id: number) => {
     setRefreshingId(id);
     try {
@@ -200,6 +250,14 @@ export function KBManager() {
       setRefreshingId(null);
     }
   };
+
+  /* sync spLinkData into draft when it loads */
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const spLinkLoaded = spLinkData?.link ?? "";
+  if (spLinkLoaded && spMasterLink !== spLinkLoaded) {
+    setSpMasterLink(spLinkLoaded);
+    setSpMasterLinkDraft(spLinkLoaded);
+  }
 
   /* file upload with tags */
   const executeUpload = async (pending: PendingFile) => {
@@ -453,6 +511,95 @@ export function KBManager() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          {/* ── SharePoint Master Sync ── */}
+          {canAddKB && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <RefreshCcw className="w-5 h-5 text-green-600" />
+                  Sync from SharePoint
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  Store your master SharePoint folder link here. Clicking <strong>Sync Now</strong> re-downloads every
+                  matching KB entry from that folder — no browsing needed.
+                </p>
+
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Paste SharePoint folder sharing link…"
+                    value={spMasterLinkDraft}
+                    data-testid="input-sp-master-link"
+                    onChange={e => setSpMasterLinkDraft(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={handleSaveMasterLink}
+                    disabled={spLinkSaving || !spMasterLinkDraft.trim() || spMasterLinkDraft === spMasterLink}
+                    data-testid="button-save-master-link"
+                  >
+                    {spLinkSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    <span className="ml-1.5">Save</span>
+                  </Button>
+                </div>
+
+                {spMasterLink && (
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-green-50 border border-green-100">
+                    <div className="flex items-center gap-2 text-sm text-green-700 min-w-0">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span className="truncate font-medium">Master link saved</span>
+                    </div>
+                    <Button
+                      onClick={handleSyncSharePoint}
+                      disabled={syncStatus === "syncing"}
+                      data-testid="button-sync-sharepoint"
+                      className="ml-3 shrink-0"
+                    >
+                      {syncStatus === "syncing" ? (
+                        <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>
+                      ) : (
+                        <><RefreshCcw className="w-4 h-4 mr-2" />Sync Now</>
+                      )}
+                    </Button>
+                  </div>
+                )}
+
+                {syncStatus === "done" && syncResult && (
+                  <div className="rounded-lg border border-border p-4 space-y-2 text-sm">
+                    <p className="font-medium text-foreground">Sync complete — {syncResult.total} files scanned</p>
+                    <p className="text-green-700">✓ {syncResult.updated} KB entries updated</p>
+                    {syncResult.newFiles.length > 0 && (
+                      <div>
+                        <p className="text-amber-600 font-medium">⚠ {syncResult.newFiles.length} new file{syncResult.newFiles.length > 1 ? "s" : ""} in SharePoint (not yet in KB):</p>
+                        <ul className="mt-1 ml-4 list-disc text-muted-foreground space-y-0.5">
+                          {syncResult.newFiles.map(f => <li key={f}>{f}</li>)}
+                        </ul>
+                        <p className="text-xs text-muted-foreground mt-1">Import them via the <button className="underline" onClick={() => setImportTab("url")}>OneDrive URL tab</button> below to add them to the KB.</p>
+                      </div>
+                    )}
+                    {syncResult.errors.length > 0 && (
+                      <div>
+                        <p className="text-destructive font-medium">✗ {syncResult.errors.length} error{syncResult.errors.length > 1 ? "s" : ""}:</p>
+                        <ul className="mt-1 ml-4 list-disc text-muted-foreground space-y-0.5">
+                          {syncResult.errors.map(e => <li key={e}>{e}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {syncStatus === "error" && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{syncError}</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* ── Upload zone ── */}
           {canAddKB && (
