@@ -210,7 +210,8 @@ export function KBManager() {
     setSyncResult(null);
     setSyncError("");
     try {
-      const result = await apiRequest("POST", "/api/kb/sync-sharepoint", {}) as unknown as {
+      const res = await apiRequest("POST", "/api/kb/sync-sharepoint", {});
+      const result = await res.json() as {
         updated: number; newFiles: string[]; errors: string[]; total: number;
       };
       setSyncResult(result);
