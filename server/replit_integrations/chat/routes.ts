@@ -824,18 +824,33 @@ export function registerChatRoutes(app: Express): void {
         kbByFilename.set(name, kb);
       }
 
-      const results = { updated: 0, newFiles: [] as string[], errors: [] as string[] };
+      const results = { updated: 0, added: 0, newFiles: [] as string[], errors: [] as string[] };
 
       for (const file of files) {
         const normalised = file.name.toLowerCase();
         const existing = kbByFilename.get(normalised);
-        if (!existing) { results.newFiles.push(file.name); continue; }
         try {
           const newContent = await extractSharedFileContent(file);
           if (!newContent.trim()) { results.errors.push(`${file.name}: empty content`); continue; }
-          const updated = await chatStorage.updateKB(existing.id, { content: newContent.trim() });
-          embedKB(existing.id, updated.title, updated.content);
-          results.updated++;
+
+          if (existing) {
+            const updated = await chatStorage.updateKB(existing.id, { content: newContent.trim() });
+            embedKB(existing.id, updated.title, updated.content);
+            results.updated++;
+          } else {
+            // Auto-import new file with empty tags (user can tag later)
+            const kb = await chatStorage.createKB({
+              title: `OneDrive: ${file.name}`,
+              content: newContent.trim(),
+              type: "onedrive",
+              productCategories: [],
+              modelNumbers: [],
+              sourceUrl: masterLink,
+            });
+            embedKB(kb.id, kb.title, kb.content);
+            results.newFiles.push(file.name);
+            results.added++;
+          }
         } catch (err: any) {
           results.errors.push(`${file.name}: ${err.message}`);
         }
