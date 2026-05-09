@@ -1,0 +1,69 @@
+Qubo Bot — Fix Deployment Guide
+Files in this package
+File
+What it does
+Where it goes in Replit
+system-prompt.md
+New optimised system prompt
+server/system-prompt.md
+sessionState.ts
+Stage-gated state serializer
+server/replit_integrations/chat/sessionState.ts
+trimConversationHistory.ts
+Rolling conversation window
+server/replit_integrations/chat/trimConversationHistory.ts
+routes.patch.ts
+Exact changes to make in routes.ts
+Reference only — not a drop-in
+Step-by-step deployment
+Step 1 — Upload system-prompt.md
+Upload system-prompt.md to server/system-prompt.md in Replit.
+This replaces the hardcoded ~8,500-char string in routes.ts with a file read.
+Step 2 — Upload sessionState.ts
+Upload sessionState.ts to server/replit_integrations/chat/sessionState.ts.
+New file — no conflicts.
+Step 3 — Upload trimConversationHistory.ts
+Upload trimConversationHistory.ts to server/replit_integrations/chat/trimConversationHistory.ts.
+New file — no conflicts.
+Step 4 — Edit routes.ts (3 targeted changes)
+Open routes.patch.ts and apply the three changes marked CHANGE 1, 2, 3.
+CHANGE 1 — Add two imports at the top:
+Ts
+CHANGE 2 — Find the DEFAULT_SYSTEM_PROMPT constant (the big string).
+Replace the entire string with:
+Ts
+CHANGE 3 — Find the {{SESSION_STATE}} replacement block.
+Replace the JSON.stringify(sessionState, null, 2) call with:
+Ts
+CHANGE 4 — Find where chatMessages is built before the OpenAI call.
+Add one line before the chatMessages.unshift(...) line:
+Ts
+Step 5 — Run the app and push the new prompt to DB
+After the app starts, call:
+Code
+This pushes the new system-prompt.md content to the settings table in PostgreSQL,
+overwriting the old prompt. The Bot Settings page will reflect the new prompt immediately.
+What each change fixes
+Change
+Problem fixed
+Token impact
+system-prompt.md
+Stray text, logic contradictions, duplicate rules, weak one-step enforcement
+−35% prompt size
+sessionState.ts
+Full state JSON sent every turn regardless of stage
+−20–30% per turn
+trimConversationHistory.ts
+History grows unbounded on long sessions
+Caps growth after turn 10
+routes.patch.ts (CHANGE 3+4)
+Wires the above into existing flow
+—
+One-step enforcement — what changed in the prompt
+The old prompt had soft wording ("give one step at a time") that the model could override.
+The new prompt has three layers:
+HARD OUTPUT RULE in PERSONALITY — explicit, capitalised, no-exceptions framing
+OUTPUT CONSTRAINT at the top of Stage 6B — stage-specific reinforcement
+SELF-CHECK BEFORE EVERY SEND — makes the model verify before responding
+This matches how LLMs are reliably constrained: rule stated once as a hard constraint,
+reinforced at the exact point of failure (Stage 6B), and verified via self-check.
