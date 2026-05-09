@@ -183,7 +183,8 @@ export function KBManager() {
   const [spLinkSaving, setSpLinkSaving] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
   const [syncResult, setSyncResult] = useState<{
-    updated: number; newFiles: string[]; errors: string[]; total: number;
+    updated: number; added: number; removed: number;
+    addedFiles: string[]; removedFiles: string[]; errors: string[]; total: number;
   } | null>(null);
   const [syncError, setSyncError] = useState("");
 
@@ -212,12 +213,13 @@ export function KBManager() {
     try {
       const res = await apiRequest("POST", "/api/kb/sync-sharepoint", {}, authHeaders);
       const result = await res.json() as {
-        updated: number; newFiles: string[]; errors: string[]; total: number;
+        updated: number; added: number; removed: number;
+        addedFiles: string[]; removedFiles: string[]; errors: string[]; total: number;
       };
       setSyncResult(result);
       setSyncStatus("done");
       queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
-      toast({ title: `Sync complete — ${result.updated} KB entries updated` });
+      toast({ title: `Sync complete — ${result.updated} updated, ${result.added} added, ${result.removed} removed` });
     } catch (err: any) {
       let msg = err?.message || "Sync failed";
       try { const j = JSON.parse(msg.replace(/^\d+:\s*/, "")); msg = j?.error || msg; } catch { /* noop */ }
@@ -570,15 +572,22 @@ export function KBManager() {
 
                 {syncStatus === "done" && syncResult && (
                   <div className="rounded-lg border border-border p-4 space-y-2 text-sm">
-                    <p className="font-medium text-foreground">Sync complete — {syncResult.total} files scanned</p>
-                    <p className="text-green-700">✓ {syncResult.updated} KB entries updated</p>
-                    {syncResult.newFiles.length > 0 && (
+                    <p className="font-medium text-foreground">Sync complete — {syncResult.total} files in SharePoint</p>
+                    <p className="text-green-700">✓ {syncResult.updated} updated</p>
+                    {syncResult.added > 0 && (
                       <div>
-                        <p className="text-amber-600 font-medium">⚠ {syncResult.newFiles.length} new file{syncResult.newFiles.length > 1 ? "s" : ""} in SharePoint (not yet in KB):</p>
+                        <p className="text-blue-600 font-medium">+ {syncResult.added} new file{syncResult.added > 1 ? "s" : ""} added to KB:</p>
                         <ul className="mt-1 ml-4 list-disc text-muted-foreground space-y-0.5">
-                          {syncResult.newFiles.map(f => <li key={f}>{f}</li>)}
+                          {syncResult.addedFiles.map(f => <li key={f}>{f}</li>)}
                         </ul>
-                        <p className="text-xs text-muted-foreground mt-1">Import them via the <button className="underline" onClick={() => setImportTab("url")}>OneDrive URL tab</button> below to add them to the KB.</p>
+                      </div>
+                    )}
+                    {syncResult.removed > 0 && (
+                      <div>
+                        <p className="text-amber-600 font-medium">− {syncResult.removed} removed (no longer in SharePoint):</p>
+                        <ul className="mt-1 ml-4 list-disc text-muted-foreground space-y-0.5">
+                          {syncResult.removedFiles.map(f => <li key={f}>{f}</li>)}
+                        </ul>
                       </div>
                     )}
                     {syncResult.errors.length > 0 && (

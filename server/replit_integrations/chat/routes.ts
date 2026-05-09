@@ -818,14 +818,20 @@ export function registerChatRoutes(app: Express): void {
       const files = await listSharedFolder(masterLink);
       const allKBs = await chatStorage.getAllKB();
 
+      // Only consider SharePoint-sourced KB entries for removal
+      const spKBs = allKBs.filter(kb => /^OneDrive:\s*/i.test(kb.title));
       const kbByFilename = new Map<string, typeof allKBs[0]>();
-      for (const kb of allKBs) {
+      for (const kb of spKBs) {
         const name = kb.title.replace(/^OneDrive:\s*/i, "").trim().toLowerCase();
         kbByFilename.set(name, kb);
       }
 
-      const results = { updated: 0, added: 0, newFiles: [] as string[], errors: [] as string[] };
+      // Build set of SharePoint filenames for removal detection
+      const spFilenames = new Set(files.map(f => f.name.toLowerCase()));
 
+      const results = { updated: 0, added: 0, removed: 0, addedFiles: [] as string[], removedFiles: [] as string[], errors: [] as string[] };
+
+      // 1. Update existing + add new
       for (const file of files) {
         const normalised = file.name.toLowerCase();
         const existing = kbByFilename.get(normalised);
@@ -838,7 +844,6 @@ export function registerChatRoutes(app: Express): void {
             embedKB(existing.id, updated.title, updated.content);
             results.updated++;
           } else {
-            // Auto-import new file with empty tags (user can tag later)
             const kb = await chatStorage.createKB({
               title: `OneDrive: ${file.name}`,
               content: newContent.trim(),
@@ -848,11 +853,24 @@ export function registerChatRoutes(app: Express): void {
               sourceUrl: masterLink,
             });
             embedKB(kb.id, kb.title, kb.content);
-            results.newFiles.push(file.name);
+            results.addedFiles.push(file.name);
             results.added++;
           }
         } catch (err: any) {
           results.errors.push(`${file.name}: ${err.message}`);
+        }
+      }
+
+      // 2. Remove KB entries whose files no longer exist in SharePoint
+      for (const [filename, kb] of kbByFilename) {
+        if (!spFilenames.has(filename)) {
+          try {
+            await chatStorage.deleteKB(kb.id);
+            results.removedFiles.push(kb.title.replace(/^OneDrive:\s*/i, "").trim());
+            results.removed++;
+          } catch (err: any) {
+            results.errors.push(`Delete ${kb.title}: ${err.message}`);
+          }
         }
       }
 
