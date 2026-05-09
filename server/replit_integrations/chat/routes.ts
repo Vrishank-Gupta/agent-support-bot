@@ -205,21 +205,22 @@ async function extractAndSaveState(
 ): Promise<void> {
   try {
     const stateSnapshot = JSON.stringify({
+      currentStage: currentState?.currentStage ?? "issue_extraction",
+      kbOnlyMode: currentState?.kbOnlyMode ?? false,
       issue: currentState?.issue ?? null,
       productCategory: currentState?.productCategory ?? null,
       modelNumber: currentState?.modelNumber ?? null,
       srNumber: currentState?.srNumber ?? null,
       accountEmail: currentState?.accountEmail ?? null,
-      identifierAvailable: currentState?.identifierAvailable ?? false,
+      // appConnectionStatus stores commissioning status in DB
       appConnectionStatus: currentState?.appConnectionStatus ?? null,
+      // signalStatus stores device online/offline status in DB
       signalStatus: currentState?.signalStatus ?? null,
+      // firmwareVersion stores software version string in DB
       firmwareVersion: currentState?.firmwareVersion ?? null,
       firmwareStatus: currentState?.firmwareStatus ?? null,
-      featuresEnabled: currentState?.featuresEnabled ?? [],
       featuresDisabled: currentState?.featuresDisabled ?? [],
-      currentStage: currentState?.currentStage ?? "issue_extraction",
       troubleshootingIndex: currentState?.troubleshootingIndex ?? 0,
-      kbOnlyMode: currentState?.kbOnlyMode ?? false,
     });
 
     const extraction = await openai.chat.completions.create({
@@ -229,24 +230,34 @@ async function extractAndSaveState(
           role: "system",
           content: `You extract conversation state updates from a Hero Electronix support chat exchange.
 
-Given the current state, the agent's message, and the assistant's response, return ONLY a JSON object containing fields that changed or were newly extracted. Omit fields that didn't change.
+Given the current state, the agent's message, and the assistant's response, return ONLY a JSON object with fields that changed or were newly extracted. Omit unchanged fields.
 
 Valid field names and types:
-- issue: string | null
-- productCategory: string | null
-- modelNumber: string | null
-- srNumber: string | null
+- issue: string | null  (the customer's problem description)
+- productCategory: string | null  (e.g. "Camera", "Router")
+- modelNumber: string | null  (e.g. "HCP06", "Q1")
+- srNumber: string | null  (Zoho SR number)
 - accountEmail: string | null
-- identifierAvailable: boolean
-- appConnectionStatus: "connected" | "disconnected" | "decommissioned" | null
-- signalStatus: "online" | "offline" | null
-- firmwareVersion: string | null
+- kbOnlyMode: boolean  (true when no SR/email available)
+- appConnectionStatus: "commissioned" | "decommissioned" | null  (device commissioning status from Zoho CRM)
+- signalStatus: "online" | "offline" | null  (device online/offline status)
+- firmwareVersion: string | null  (software version string, e.g. "HCP06_01_01_93_SYSTEM")
 - firmwareStatus: "ok" | "outdated" | "unknown" | null
-- featuresEnabled: string[]
-- featuresDisabled: string[]
-- currentStage: "issue_extraction" | "device_context_collection" | "analyse_and_route" | "kb_troubleshooting" | "session_close"
-- troubleshootingIndex: integer (increment when a KB step is completed)
-- kbOnlyMode: boolean
+- featuresDisabled: string[]  (list of disabled features from Device Settings)
+- troubleshootingIndex: integer  (increment by 1 each time a KB troubleshooting step is completed)
+- currentStage: one of the following stage identifiers:
+    "issue_extraction"         → bot has not yet understood the issue
+    "identifier_collection"    → bot understood the issue, now collecting SR/email
+    "device_settings_collection" → bot has SR/email, now collecting Zoho device settings
+    "commissioning_check"      → bot has device settings, now checking commissioning status
+    "firmware_signal_check"    → commissioned, now checking firmware version and RSSI
+    "diagnose_troubleshoot"    → firmware/signal checked, now in diagnostic briefing + KB steps
+    "close"                    → issue resolved, session closing
+
+Rules:
+- Advance currentStage only when the assistant has explicitly completed that stage's goal.
+- Never skip a stage. Never go backwards.
+- If unsure whether a stage is complete, keep the current stage.
 
 Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanation.`,
         },
@@ -911,8 +922,18 @@ export function registerChatRoutes(app: Express): void {
       const savedPrompt = await chatStorage.getSetting("system_prompt");
       const basePrompt = savedPrompt ?? DEFAULT_SYSTEM_PROMPT;
 
+      // Normalize old stage names → new stage names so the prompt always sees consistent values
+      const stageNameMap: Record<string, string> = {
+        "device_context_collection": "device_settings_collection",
+        "analyse_and_route":         "commissioning_check",
+        "kb_troubleshooting":        "diagnose_troubleshoot",
+        "session_close":             "close",
+      };
+      const rawStage = state?.currentStage ?? "issue_extraction";
+      const normalizedStage = stageNameMap[rawStage] ?? rawStage;
+
       const sessionState = {
-        currentStage: state?.currentStage ?? "issue_extraction",
+        currentStage: normalizedStage,
         kbOnlyMode: state?.kbOnlyMode ?? false,
         issue: state?.issue ?? null,
         productCategory: state?.productCategory ?? null,
@@ -933,12 +954,14 @@ export function registerChatRoutes(app: Express): void {
         diagnosisBriefingDone: (state as any)?.diagnosisBriefingDone ?? false,
       };
 
-      // Stage-gated KB injection — only load articles from Stage 4 onwards
+      // Stage-gated KB injection — load KB once device data has arrived (Stage 3+)
+      // device_context_collection included: commissioning/firmware checks need KB immediately after device data
       const kbActiveStages = [
-        "commissioning_check", "firmware_signal_check",
+        // new stage names
+        "device_settings_collection", "commissioning_check", "firmware_signal_check",
         "diagnose_troubleshoot", "close",
-        // legacy stage names for backward compat
-        "analyse_and_route", "kb_troubleshooting", "session_close",
+        // legacy stage names (old sessions in DB)
+        "device_context_collection", "analyse_and_route", "kb_troubleshooting", "session_close",
       ];
       const inKBStage = kbActiveStages.includes(sessionState.currentStage) || sessionState.kbOnlyMode;
 
