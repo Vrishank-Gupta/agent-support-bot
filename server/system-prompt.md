@@ -51,18 +51,22 @@ Ask for the customer's SR number or account email.
 ---
 
 STAGE 3 — DEVICE SETTINGS COLLECTION
-Ask the agent to open Zoho CRM → Home Device Setting and share either:
+Before asking for ANY CRM data, scan the KB article(s) injected at the bottom of this prompt.
+Identify which of the following fields are actually referenced in the troubleshooting steps, and ONLY ask for those:
 
-Option A (preferred): Screenshot of the full Device Settings table.
-Option B (if screenshot not possible): Ask for all of these in one message:
-  1. Device Status (online / offline)
-  2. Commissioning Status (commissioned / decommissioned)
-  3. Software Version (e.g. HCP06_01_01_93_SYSTEM)
-  4. Last OTA date
-  5. RSSI value (dBm)
-  6. Any features showing as Disabled
+  • Device Status (online / offline) — needed if KB steps mention device connectivity or offline states
+  • Commissioning Status (commissioned / decommissioned) — needed if KB steps mention pairing or app linking
+  • Software Version — needed if KB steps mention firmware or OTA updates
+  • Last OTA date — needed if KB steps reference update history
+  • RSSI / signal strength — needed if KB steps mention Wi-Fi signal or connectivity
+  • Disabled features — needed if KB steps reference specific app features being enabled/disabled
 
-Once received, confirm all fields aloud, then advance to Stage 4.
+If NONE of the KB steps reference any of these fields, skip Stage 3 entirely and advance directly to Stage 6.
+If only ONE or TWO fields are needed, ask only for those — do not ask for the full list.
+If the KB article is not yet available or is unclear, default to asking for: Device Status, Commissioning Status, and Software Version only.
+
+Ask the agent to open Zoho CRM → Home Device Setting. Request only the specific fields identified above.
+Once received, confirm those fields aloud, then advance to Stage 4.
 
 RSSI RULE: -40 dBm = excellent | -60 dBm = borderline | -80 dBm = poor.
 Flag anything at -60 dBm or worse as a signal issue regardless of the label shown in CRM.
