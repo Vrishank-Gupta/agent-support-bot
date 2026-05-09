@@ -1,25 +1,20 @@
 /**
  * kbSearch.ts
  * Hybrid KB search: semantic (pgvector) + keyword (BM25/ts_rank), merged and deduplicated.
- * Falls back to keyword-only if pgvector is not set up or embeddings are missing.
+ * Search query built from device state via buildKBQuery() — not just the agent's message.
+ * Falls back to keyword-only if pgvector embeddings are unavailable.
  */
 
 import OpenAI from "openai";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
+import type { FullSessionState } from "./sessionState";
 
+// Prefer a direct OpenAI API key (supports embeddings) over the Replit proxy (chat-only)
 const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+  baseURL: process.env.OPENAI_API_KEY ? undefined : process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
-
-async function embedQuery(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text.slice(0, 8000),
-  });
-  return response.data[0].embedding;
-}
 
 export interface KBArticle {
   id: number;
@@ -35,6 +30,60 @@ interface SearchOptions {
   semanticWeight?: number;
 }
 
+/**
+ * buildKBQuery — builds a rich search query from collected device state.
+ *
+ * Uses model number, product category, issue, device condition, and disabled features
+ * to retrieve the KB article that matches the actual device situation — not just keywords
+ * from the agent's latest message.
+ *
+ * Examples:
+ *   "HCP06 camera offline decommissioned setup pairing"
+ *   "HCP06 camera offline firmware outdated weak signal connectivity"
+ *   "QHC-MM1 motion detection disabled night vision"
+ */
+export function buildKBQuery(
+  state: Partial<FullSessionState>,
+  userMessage: string
+): string {
+  const parts: string[] = [];
+
+  // Device identity — highest signal for KB matching
+  if (state.modelNumber)     parts.push(state.modelNumber);
+  if (state.productCategory) parts.push(state.productCategory);
+
+  // The actual problem
+  if (state.issue)           parts.push(state.issue);
+
+  // Device condition — narrows to the right article variant
+  if (state.deviceStatus)                       parts.push(state.deviceStatus);
+  if (state.commissioningStatus)                parts.push(state.commissioningStatus);
+  if (state.firmwareOutdated === true)          parts.push("firmware outdated");
+  if (state.firmwareOutdated === false)         parts.push("firmware current");
+  if (state.signalWeak === true)                parts.push("weak signal poor RSSI");
+
+  // Disabled features — find articles that address them specifically
+  if (state.disabledFeatures && state.disabledFeatures.length > 0) {
+    parts.push(...state.disabledFeatures);
+  }
+
+  // Agent's current message as fallback context (trimmed to avoid diluting device-specific terms)
+  if (userMessage) parts.push(userMessage.slice(0, 120));
+
+  return parts.filter(Boolean).join(" ");
+}
+
+async function embedQuery(text: string): Promise<number[]> {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text.slice(0, 8000),
+  });
+  return response.data[0].embedding;
+}
+
+/**
+ * Hybrid KB search — semantic + keyword, merged and deduplicated.
+ */
 export async function searchKB(
   query: string,
   options: SearchOptions = {}
@@ -51,11 +100,7 @@ export async function searchKB(
 
     const rows = await db.execute(sql`
       SELECT
-        id,
-        title,
-        content,
-        category,
-        source_url,
+        id, title, content, category, source_url,
         1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
       FROM knowledge_base
       WHERE embedding IS NOT NULL
@@ -80,11 +125,7 @@ export async function searchKB(
   try {
     const rows = await db.execute(sql`
       SELECT
-        id,
-        title,
-        content,
-        category,
-        source_url,
+        id, title, content, category, source_url,
         ts_rank(
           to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, '')),
           plainto_tsquery('english', ${query})
@@ -113,7 +154,6 @@ export async function searchKB(
 
   // ── Merge and deduplicate ────────────────────────────────────
   const merged = new Map<number, KBArticle>();
-
   for (const article of [...semanticResults, ...keywordResults]) {
     if (merged.has(article.id)) {
       merged.get(article.id)!.score += article.score;

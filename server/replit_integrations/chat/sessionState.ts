@@ -44,6 +44,7 @@ export interface FullSessionState {
   kbDocTitle: string | null;
   kbDocLink: string | null;
   kbArticlesFound: boolean;
+  kbStepTotal: number;
   currentKbStepIndex: number;
   diagnosisBriefingDone: boolean;
 }
@@ -129,6 +130,7 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         kbDocTitle: state.kbDocTitle ?? null,
         kbDocLink: state.kbDocLink ?? null,
         kbArticlesFound: state.kbArticlesFound ?? false,
+        kbStepTotal: state.kbStepTotal ?? 0,
         currentKbStepIndex: state.currentKbStepIndex ?? 0,
         diagnosisBriefingDone: state.diagnosisBriefingDone ?? false,
       });

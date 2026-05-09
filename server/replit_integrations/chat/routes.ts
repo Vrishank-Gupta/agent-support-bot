@@ -10,7 +10,8 @@ import { readFileSync } from "fs";
 import path from "path";
 import { serializeSessionState } from "./sessionState";
 import { trimConversationHistory } from "./trimConversationHistory";
-import { searchKB as hybridSearchKB, embedKBArticle, backfillEmbeddings } from "./kbSearch";
+import { searchKB as hybridSearchKB, buildKBQuery, embedKBArticle, backfillEmbeddings } from "./kbSearch";
+import type { FullSessionState } from "./sessionState";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
 const mammoth = require("mammoth");
@@ -884,16 +885,23 @@ export function registerChatRoutes(app: Express): void {
       // 1. Load conversation state — drives stage-aware search and prompt injection
       const state = await chatStorage.getConversationState(conversationId);
 
-      // 2. Hybrid KB search (semantic + keyword) — enriched with all known session context
-      const searchQuery = [
-        state?.issue,
-        state?.modelNumber,
-        state?.productCategory,
-        content || attachments.map(a => a.filename).join(" "),
-      ].filter(Boolean).join(" ");
-
-      const topArticles = await hybridSearchKB(searchQuery, { limit: 3 });
+      // 2. Device-state-aware hybrid KB search — marries SR/device data to KB articles
+      const stateForSearch: Partial<FullSessionState> = {
+        modelNumber: state?.modelNumber ?? null,
+        productCategory: state?.productCategory ?? null,
+        issue: state?.issue ?? null,
+        deviceStatus: (state?.signalStatus as any) ?? null,
+        commissioningStatus: (state?.appConnectionStatus as any) ?? null,
+        firmwareOutdated: state?.firmwareStatus === "outdated" ? true : state?.firmwareStatus === "ok" ? false : null,
+        signalWeak: (state as any)?.signalWeak ?? null,
+        disabledFeatures: state?.featuresDisabled ?? [],
+      };
+      const kbSearchQuery = buildKBQuery(stateForSearch, content || attachments.map(a => a.filename).join(" "));
+      const topArticles = await hybridSearchKB(kbSearchQuery, { limit: 3 });
       const kbArticlesFound = topArticles.length > 0;
+      const kbStepTotal = kbArticlesFound
+        ? (topArticles[0].content.match(/^\s*(\d+\.|step\s+\d+)/gim) ?? []).length
+        : 0;
 
       const messages = await chatStorage.getMessagesByConversation(conversationId);
       // Build chat messages — use multimodal content for the last user message if attachments exist
@@ -948,18 +956,19 @@ export function registerChatRoutes(app: Express): void {
         productCategory: state?.productCategory ?? null,
         srNumber: state?.srNumber ?? null,
         accountEmail: state?.accountEmail ?? null,
-        deviceStatus: (state as any)?.deviceStatus ?? null,
-        commissioningStatus: (state as any)?.commissioningStatus ?? null,
-        softwareVersion: (state as any)?.softwareVersion ?? null,
+        deviceStatus: state?.signalStatus ?? null,
+        commissioningStatus: state?.appConnectionStatus ?? null,
+        softwareVersion: state?.firmwareVersion ?? null,
         lastOtaDate: (state as any)?.lastOtaDate ?? null,
         rssi: (state as any)?.rssi ?? null,
-        disabledFeatures: (state as any)?.disabledFeatures ?? [],
+        disabledFeatures: state?.featuresDisabled ?? [],
         modelNumber: state?.modelNumber ?? null,
-        firmwareOutdated: (state as any)?.firmwareOutdated ?? null,
+        firmwareOutdated: state?.firmwareStatus === "outdated" ? true : state?.firmwareStatus === "ok" ? false : null,
         signalWeak: (state as any)?.signalWeak ?? null,
         kbDocTitle: (state as any)?.kbDocTitle ?? null,
         kbDocLink: (state as any)?.kbDocLink ?? null,
         kbArticlesFound,
+        kbStepTotal,
         currentKbStepIndex: state?.troubleshootingIndex ?? 0,
         diagnosisBriefingDone: (state?.troubleshootingIndex ?? 0) > 0,
       };
@@ -981,10 +990,16 @@ export function registerChatRoutes(app: Express): void {
       } else if (!kbArticlesFound) {
         kbSection = `\n\nKNOWLEDGE BASE: No articles found for this query.\n(kbArticlesFound = false — follow Stage 6B rules: do NOT improvise steps.)`;
       } else {
-        const articlesText = topArticles.map((art, i) =>
-          `[Article ${i + 1} of ${topArticles.length}]\nTitle: ${art.title}${art.sourceUrl ? `\nSource: ${art.sourceUrl}` : ""}\n\n${art.content}`
-        ).join("\n\n---\n\n");
-        kbSection = `\n\nKNOWLEDGE BASE ARTICLES — authoritative steps only:\n${articlesText}`;
+        kbSection = [
+          `\n\nRETRIEVED KB ARTICLES — FOLLOW THESE EXACTLY IN ORDER`,
+          `Do not use any knowledge outside these articles for troubleshooting steps.`,
+          `Total articles retrieved: ${topArticles.length}\n`,
+          ...topArticles.map((art, i) =>
+            `--- KB ARTICLE ${i + 1} OF ${topArticles.length} ---\n` +
+            `Title: ${art.title}${art.sourceUrl ? `\nSource: ${art.sourceUrl}` : ""}\n` +
+            art.content
+          ),
+        ].join("\n");
       }
 
       // Stage-gated state serialization — only sends fields relevant to current stage (~30% token saving)
