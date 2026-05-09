@@ -43,6 +43,7 @@ export interface FullSessionState {
   // Stage 6
   kbDocTitle: string | null;
   kbDocLink: string | null;
+  kbArticlesFound: boolean;
   currentKbStepIndex: number;
   diagnosisBriefingDone: boolean;
 }
@@ -127,6 +128,7 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         signalWeak: state.signalWeak,
         kbDocTitle: state.kbDocTitle ?? null,
         kbDocLink: state.kbDocLink ?? null,
+        kbArticlesFound: state.kbArticlesFound ?? false,
         currentKbStepIndex: state.currentKbStepIndex ?? 0,
         diagnosisBriefingDone: state.diagnosisBriefingDone ?? false,
       });

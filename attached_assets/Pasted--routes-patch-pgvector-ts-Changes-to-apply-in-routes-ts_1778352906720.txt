@@ -1,0 +1,102 @@
+/**
+ * routes.patch-pgvector.ts
+ * -------------------------
+ * Changes to apply in routes.ts for pgvector + device-state-aware KB search.
+ * Apply AFTER the main routes.patch.ts changes are already in place.
+ *
+ * CHANGE A — Imports
+ * CHANGE B — Replace KB search call (now uses device state to build query)
+ * CHANGE C — Auto-embed on KB create/update
+ * CHANGE D — Backfill endpoint
+ */
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE A — Add import at top of routes.ts
+// ─────────────────────────────────────────────────────────────
+import { searchKB, buildKBQuery, embedKBArticle, backfillEmbeddings } from "./kbSearch";
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE B — Replace your existing KB search call
+//
+// FIND your existing BM25 block — looks like:
+//   const topArticles = performBM25Search(allKBArticles, userMessage, 5);
+//   (or however your search is currently called)
+//
+// REPLACE WITH:
+// ─────────────────────────────────────────────────────────────
+
+// Build search query from device state + issue + agent message.
+// This is what marries SR/device data to KB articles.
+const kbSearchQuery = buildKBQuery(sessionState, userMessage);
+
+// Hybrid search — semantic + keyword, top 3 articles
+const topArticles = await searchKB(kbSearchQuery, { limit: 3 });
+
+const kbArticlesFound = topArticles.length > 0;
+
+// Count steps in the top article for exhaustion tracking
+const kbStepTotal = kbArticlesFound
+  ? (topArticles[0].content.match(/^\s*(\d+\.|step\s+\d+)/gim) ?? []).length
+  : 0;
+
+// Structured KB injection — indexed so the model follows order correctly
+const kbContext = kbArticlesFound
+  ? [
+      `\n\nRETRIEVED KB ARTICLES — FOLLOW THESE EXACTLY IN ORDER`,
+      `Do not use any knowledge outside these articles for troubleshooting steps.`,
+      `Total articles retrieved: ${topArticles.length}\n`,
+      ...topArticles.map(
+        (a: any, i: number) =>
+          `--- KB ARTICLE ${i + 1} OF ${topArticles.length} ---\n` +
+          `Title: ${a.title}\n` +
+          `${a.content}`
+      ),
+    ].join("\n")
+  : "";
+
+// Save kbArticlesFound + kbStepTotal to session state
+await chatStorage.upsertConversationState(conversationId, {
+  kbArticlesFound,
+  kbStepTotal,
+  kbDocTitle: kbArticlesFound ? topArticles[0].title : null,
+});
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE C — Auto-embed on KB create/update
+//
+// In your POST /api/kb route, after createKB call, ADD:
+// ─────────────────────────────────────────────────────────────
+try {
+  await embedKBArticle(newKb.id, newKb.title, newKb.content);
+} catch (err) {
+  console.error("[KB] Failed to embed new article:", err);
+  // Non-fatal — backfill will catch it
+}
+
+// In your PUT /api/kb/:id route, after updateKB call, ADD:
+try {
+  await embedKBArticle(updated.id, updated.title, updated.content);
+} catch (err) {
+  console.error("[KB] Failed to re-embed updated article:", err);
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// CHANGE D — Backfill endpoint (add as a new route)
+// ─────────────────────────────────────────────────────────────
+app.post("/api/kb/backfill", async (req, res) => {
+  try {
+    const result = await backfillEmbeddings();
+    res.json({
+      success: true,
+      processed: result.processed,
+      errors: result.errors,
+      message: `Embedded ${result.processed} articles. ${result.errors} errors.`,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});

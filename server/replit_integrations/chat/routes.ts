@@ -10,6 +10,7 @@ import { readFileSync } from "fs";
 import path from "path";
 import { serializeSessionState } from "./sessionState";
 import { trimConversationHistory } from "./trimConversationHistory";
+import { searchKB as hybridSearchKB, embedKBArticle, backfillEmbeddings } from "./kbSearch";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
 const mammoth = require("mammoth");
@@ -140,14 +141,13 @@ function searchKBKeyword(
   return scored.slice(0, topK).map(s => s.kb);
 }
 
-/** No-op kept for call-site compatibility — embeddings not supported by current AI proxy */
-async function embedKB(_id: number, _title: string, _content: string): Promise<void> {}
-
-/** Find top-K most relevant KB entries to the query using keyword search */
-async function searchKB(query: string, topK = 5): Promise<Awaited<ReturnType<typeof chatStorage.getAllKB>>> {
-  const kbs = await chatStorage.getAllKB();
-  if (kbs.length === 0) return [];
-  return searchKBKeyword(query, kbs, topK);
+/** Embed a KB article — delegates to kbSearch.ts (non-fatal on failure) */
+async function embedKB(id: number, title: string, content: string): Promise<void> {
+  try {
+    await embedKBArticle(id, title, content);
+  } catch (err: any) {
+    console.warn("[embedKB] Embedding failed (non-fatal):", err.message);
+  }
 }
 
 const SYSTEM_PROMPT_PATH = path.join(process.cwd(), "server/system-prompt.md");
@@ -884,18 +884,16 @@ export function registerChatRoutes(app: Express): void {
       // 1. Load conversation state — drives stage-aware search and prompt injection
       const state = await chatStorage.getConversationState(conversationId);
 
-      // 2. State-aware KB search: enriches query with known issue/product/stage context
-      const relevantKBs = await searchKBWithState(content || attachments.map(a => a.filename).join(" "), state, 5);
-      const kbContext = relevantKBs.map(k => {
-        const tags: string[] = [];
-        if (k.productCategories?.length) tags.push(`Product: ${k.productCategories.join(", ")}`);
-        if (k.modelNumbers?.length) tags.push(`Model: ${k.modelNumbers.join(", ")}`);
-        if (k.firmwareRequired && k.firmwareRequired !== "not_applicable") tags.push(`Firmware: ${k.firmwareRequired}+`);
-        if (k.appVersionRequired && k.appVersionRequired !== "not_applicable") tags.push(`App: ${k.appVersionRequired}+`);
-        const tagStr = tags.length ? ` [${tags.join(" | ")}]` : "";
-        const sourceLink = k.sourceUrl ? ` (${k.sourceUrl})` : "";
-        return `[Source: ${k.title}${sourceLink}]${tagStr}\n${k.content}`;
-      }).join("\n\n");
+      // 2. Hybrid KB search (semantic + keyword) — enriched with all known session context
+      const searchQuery = [
+        state?.issue,
+        state?.modelNumber,
+        state?.productCategory,
+        content || attachments.map(a => a.filename).join(" "),
+      ].filter(Boolean).join(" ");
+
+      const topArticles = await hybridSearchKB(searchQuery, { limit: 3 });
+      const kbArticlesFound = topArticles.length > 0;
 
       const messages = await chatStorage.getMessagesByConversation(conversationId);
       // Build chat messages — use multimodal content for the last user message if attachments exist
@@ -961,8 +959,9 @@ export function registerChatRoutes(app: Express): void {
         signalWeak: (state as any)?.signalWeak ?? null,
         kbDocTitle: (state as any)?.kbDocTitle ?? null,
         kbDocLink: (state as any)?.kbDocLink ?? null,
-        currentKbStepIndex: (state as any)?.currentKbStepIndex ?? 0,
-        diagnosisBriefingDone: (state as any)?.diagnosisBriefingDone ?? false,
+        kbArticlesFound,
+        currentKbStepIndex: state?.troubleshootingIndex ?? 0,
+        diagnosisBriefingDone: (state?.troubleshootingIndex ?? 0) > 0,
       };
 
       // Stage-gated KB injection — load KB once device data has arrived (Stage 3+)
@@ -976,9 +975,17 @@ export function registerChatRoutes(app: Express): void {
       ];
       const inKBStage = kbActiveStages.includes(sessionState.currentStage) || sessionState.kbOnlyMode;
 
-      const kbSection = inKBStage && kbContext.trim()
-        ? `\n\nKNOWLEDGE BASE — use ONLY for Stage 4 onwards:\n${kbContext}`
-        : `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
+      let kbSection: string;
+      if (!inKBStage) {
+        kbSection = `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
+      } else if (!kbArticlesFound) {
+        kbSection = `\n\nKNOWLEDGE BASE: No articles found for this query.\n(kbArticlesFound = false — follow Stage 6B rules: do NOT improvise steps.)`;
+      } else {
+        const articlesText = topArticles.map((art, i) =>
+          `[Article ${i + 1} of ${topArticles.length}]\nTitle: ${art.title}${art.sourceUrl ? `\nSource: ${art.sourceUrl}` : ""}\n\n${art.content}`
+        ).join("\n\n---\n\n");
+        kbSection = `\n\nKNOWLEDGE BASE ARTICLES — authoritative steps only:\n${articlesText}`;
+      }
 
       // Stage-gated state serialization — only sends fields relevant to current stage (~30% token saving)
       const systemPromptWithState = (basePrompt.includes("{{SESSION_STATE}}")
@@ -1036,6 +1043,14 @@ export function registerChatRoutes(app: Express): void {
       // 4. Fire-and-forget state extraction — runs after response is sent, zero client latency impact
       extractAndSaveState(conversationId, state, content, fullResponse).catch(() => {});
 
+      // 5. Server-side KB step index increment — reliable counter independent of state extractor
+      // Fires whenever the session was already in diagnose_troubleshoot at the START of this request
+      if (state?.currentStage === "diagnose_troubleshoot" || normalizedStage === "diagnose_troubleshoot") {
+        chatStorage.upsertConversationState(conversationId, {
+          troubleshootingIndex: (state?.troubleshootingIndex ?? 0) + 1,
+        }).catch(() => {});
+      }
+
     } catch (error) {
       console.error("Error sending message:", error);
       if (res.headersSent) {
@@ -1047,14 +1062,40 @@ export function registerChatRoutes(app: Express): void {
     }
   });
 
+  // ── Backfill endpoint — generate embeddings for all KB articles missing one ──
+  app.post("/api/kb/backfill", async (req: Request, res: Response) => {
+    try {
+      console.log("[backfill] Starting KB embedding backfill...");
+      const result = await backfillEmbeddings();
+      console.log(`[backfill] Done. Processed: ${result.processed}, Errors: ${result.errors}`);
+      res.json({
+        success: true,
+        processed: result.processed,
+        errors: result.errors,
+        message: `Embedded ${result.processed} articles. ${result.errors} errors.`,
+      });
+    } catch (err) {
+      console.error("[backfill] Fatal error:", err);
+      res.status(500).json({ success: false, error: String(err) });
+    }
+  });
+
   // ── Startup: auto-embed any KB entries that are missing embeddings ────────
+  // Probes one article first — if the embedding endpoint is unavailable, skips all to avoid log spam.
   (async () => {
     try {
       await new Promise(r => setTimeout(r, 3000)); // wait for server to settle
       const unindexed = await chatStorage.getKBsWithoutEmbedding();
       if (unindexed.length === 0) return;
       console.log(`[embed] Auto-indexing ${unindexed.length} KB entries without embeddings...`);
-      for (const kb of unindexed) {
+      // Probe with first article — bail out early if embeddings are unsupported
+      try {
+        await embedKBArticle(unindexed[0].id, unindexed[0].title, unindexed[0].content);
+      } catch (probeErr: any) {
+        console.log(`[embed] Embedding endpoint not available (${probeErr.message?.slice(0, 60)}). Skipping auto-index. Chat will use keyword search.`);
+        return;
+      }
+      for (const kb of unindexed.slice(1)) {
         await embedKB(kb.id, kb.title, kb.content);
       }
       console.log(`[embed] Auto-indexing complete.`);
