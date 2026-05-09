@@ -150,10 +150,13 @@ async function searchKB(query: string, topK = 5): Promise<Awaited<ReturnType<typ
   return searchKBKeyword(query, kbs, topK);
 }
 
-export const DEFAULT_SYSTEM_PROMPT = readFileSync(
-  path.join(process.cwd(), "server/system-prompt.md"),
-  "utf-8"
-);
+const SYSTEM_PROMPT_PATH = path.join(process.cwd(), "server/system-prompt.md");
+/** Always reads from disk so a file change + reset takes effect without restarting the server */
+export function getDefaultSystemPrompt(): string {
+  return readFileSync(SYSTEM_PROMPT_PATH, "utf-8");
+}
+/** Cached at startup — used as the ultimate fallback if disk read fails */
+export const DEFAULT_SYSTEM_PROMPT = getDefaultSystemPrompt();
 
 /** Stage-aware KB search — enhances query with state context and boosts matching category/model docs */
 async function searchKBWithState(
@@ -421,9 +424,10 @@ export function registerChatRoutes(app: Express): void {
   app.post("/api/settings/reset", async (req: Request, res: Response) => {
     if (!await requireAdmin(req, res)) return;
     try {
-      await chatStorage.setSetting("system_prompt", DEFAULT_SYSTEM_PROMPT);
+      const freshPrompt = getDefaultSystemPrompt();
+      await chatStorage.setSetting("system_prompt", freshPrompt);
       await chatStorage.setSetting("system_prompt_updated_at", new Date().toISOString());
-      res.json({ ok: true, systemPrompt: DEFAULT_SYSTEM_PROMPT });
+      res.json({ ok: true, systemPrompt: freshPrompt });
     } catch (error) {
       res.status(500).json({ error: "Failed to reset settings" });
     }
