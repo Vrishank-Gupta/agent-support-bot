@@ -15,7 +15,7 @@ import {
   Folder, FolderOpen, File as FileIcon, Download, RefreshCw, Settings2, RotateCcw, RefreshCcw
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useUser } from "@/lib/userContext";
+import { useUser, useAuthHeaders } from "@/lib/userContext";
 import type { KnowledgeBase } from "@shared/schema";
 
 interface OdFileItem {
@@ -103,6 +103,7 @@ interface PendingFile {
 export function KBManager() {
   const { toast } = useToast();
   const { canAddKB } = useUser();
+  const authHeaders = useAuthHeaders();
 
   // Editing / adding state
   const [isEditing, setIsEditing] = useState<number | null>(null);
@@ -193,8 +194,7 @@ export function KBManager() {
     if (!spMasterLinkDraft.trim()) return;
     setSpLinkSaving(true);
     try {
-      const email = localStorage.getItem("userEmail") || "";
-      await apiRequest("PUT", "/api/settings/sharepoint-master-link", { link: spMasterLinkDraft.trim() });
+      await apiRequest("PUT", "/api/settings/sharepoint-master-link", { link: spMasterLinkDraft.trim() }, authHeaders);
       setSpMasterLink(spMasterLinkDraft.trim());
       queryClient.invalidateQueries({ queryKey: ["/api/settings/sharepoint-master-link"] });
       toast({ title: "Master link saved" });
@@ -210,7 +210,7 @@ export function KBManager() {
     setSyncResult(null);
     setSyncError("");
     try {
-      const res = await apiRequest("POST", "/api/kb/sync-sharepoint", {});
+      const res = await apiRequest("POST", "/api/kb/sync-sharepoint", {}, authHeaders);
       const result = await res.json() as {
         updated: number; newFiles: string[]; errors: string[]; total: number;
       };
