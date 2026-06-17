@@ -1,8 +1,8 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import {
-  conversations, messages, knowledgeBase, whitelistedUsers, tokenUsage, settings, conversationState,
-  type InsertKnowledgeBase, type InsertWhitelistedUser, type ConversationState,
+  conversations, messages, knowledgeBase, knowledgeBaseChunks, whitelistedUsers, tokenUsage, settings, conversationState,
+  type InsertKnowledgeBase, type InsertKnowledgeBaseChunk, type InsertWhitelistedUser, type ConversationState,
 } from "@shared/schema";
 import { eq, desc, isNull } from "drizzle-orm";
 
@@ -23,6 +23,9 @@ export interface IChatStorage {
   updateKB(id: number, kb: Partial<InsertKnowledgeBase>): Promise<typeof knowledgeBase.$inferSelect>;
   updateKBEmbedding(id: number, embedding: number[]): Promise<void>;
   deleteKB(id: number): Promise<void>;
+  replaceKBChunks(kbId: number, chunks: InsertKnowledgeBaseChunk[]): Promise<void>;
+  getKBChunksWithoutEmbedding(): Promise<(typeof knowledgeBaseChunks.$inferSelect)[]>;
+  updateKBChunkEmbedding(id: number, embedding: number[]): Promise<void>;
 
   // Whitelist
   getAllUsers(): Promise<(typeof whitelistedUsers.$inferSelect)[]>;
@@ -110,6 +113,21 @@ export const chatStorage: IChatStorage = {
 
   async deleteKB(id: number) {
     await db.delete(knowledgeBase).where(eq(knowledgeBase.id, id));
+  },
+
+  async replaceKBChunks(kbId: number, chunks: InsertKnowledgeBaseChunk[]) {
+    await db.delete(knowledgeBaseChunks).where(eq(knowledgeBaseChunks.knowledgeBaseId, kbId));
+    if (chunks.length > 0) {
+      await db.insert(knowledgeBaseChunks).values(chunks);
+    }
+  },
+
+  async getKBChunksWithoutEmbedding() {
+    return db.select().from(knowledgeBaseChunks).where(isNull(knowledgeBaseChunks.embedding));
+  },
+
+  async updateKBChunkEmbedding(id: number, embedding: number[]) {
+    await db.update(knowledgeBaseChunks).set({ embedding }).where(eq(knowledgeBaseChunks.id, id));
   },
 
   // ── Whitelist ──────────────────────────────────────

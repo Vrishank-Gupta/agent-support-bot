@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: support-bot-helper-postgres
+    environment:
+      POSTGRES_USER: supportbot
+      POSTGRES_PASSWORD: supportbot
+      POSTGRES_DB: supportbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - support-bot-helper-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supportbot -d supportbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  support-bot-helper-postgres:

@@ -7,9 +7,26 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 export const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || "missing-openai-key",
+  baseURL: process.env.OPENAI_API_KEY ? undefined : process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
+
+function getOutputAudio(response: any): { transcript: string; data: string } {
+  for (const item of response?.output ?? []) {
+    for (const content of item?.content ?? []) {
+      if (content?.type === "output_audio") {
+        return {
+          transcript: content.transcript ?? "",
+          data: content.data ?? "",
+        };
+      }
+      if (content?.type === "output_text" && content.text) {
+        return { transcript: content.text, data: "" };
+      }
+    }
+  }
+  return { transcript: response?.output_text ?? "", data: "" };
+}
 
 export type AudioFormat = "wav" | "mp3" | "webm" | "mp4" | "ogg" | "unknown";
 
@@ -117,20 +134,19 @@ export async function voiceChat(
   outputFormat: "wav" | "mp3" = "mp3"
 ): Promise<{ transcript: string; audioResponse: Buffer }> {
   const audioBase64 = audioBuffer.toString("base64");
-  const response = await openai.chat.completions.create({
+  const response = await openai.responses.create({
     model: "gpt-audio",
     modalities: ["text", "audio"],
     audio: { voice, format: outputFormat },
-    messages: [{
+    input: [{
       role: "user",
       content: [
         { type: "input_audio", input_audio: { data: audioBase64, format: inputFormat } },
       ],
     }],
-  });
-  const message = response.choices[0]?.message as any;
-  const transcript = message?.audio?.transcript || message?.content || "";
-  const audioData = message?.audio?.data ?? "";
+    store: false,
+  } as any);
+  const { transcript, data: audioData } = getOutputAudio(response);
   return {
     transcript,
     audioResponse: Buffer.from(audioData, "base64"),
@@ -153,28 +169,27 @@ export async function voiceChatStream(
   inputFormat: "wav" | "mp3" = "wav"
 ): Promise<AsyncIterable<{ type: "transcript" | "audio"; data: string }>> {
   const audioBase64 = audioBuffer.toString("base64");
-  const stream = await openai.chat.completions.create({
+  const stream: any = await openai.responses.create({
     model: "gpt-audio",
     modalities: ["text", "audio"],
     audio: { voice, format: "pcm16" },
-    messages: [{
+    input: [{
       role: "user",
       content: [
         { type: "input_audio", input_audio: { data: audioBase64, format: inputFormat } },
       ],
     }],
     stream: true,
-  });
+    store: false,
+  } as any);
 
   return (async function* () {
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta as any;
-      if (!delta) continue;
-      if (delta?.audio?.transcript) {
-        yield { type: "transcript", data: delta.audio.transcript };
+    for await (const event of stream) {
+      if (event.type === "response.audio.transcript.delta" && event.delta) {
+        yield { type: "transcript", data: event.delta };
       }
-      if (delta?.audio?.data) {
-        yield { type: "audio", data: delta.audio.data };
+      if (event.type === "response.audio.delta" && event.delta) {
+        yield { type: "audio", data: event.delta };
       }
     }
   })();
@@ -189,16 +204,15 @@ export async function textToSpeech(
   voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" = "alloy",
   format: "wav" | "mp3" | "flac" | "opus" | "pcm16" = "wav"
 ): Promise<Buffer> {
-  const response = await openai.chat.completions.create({
+  const response = await openai.responses.create({
     model: "gpt-audio",
     modalities: ["text", "audio"],
     audio: { voice, format },
-    messages: [
-      { role: "system", content: "You are an assistant that performs text-to-speech." },
-      { role: "user", content: `Repeat the following text verbatim: ${text}` },
-    ],
-  });
-  const audioData = (response.choices[0]?.message as any)?.audio?.data ?? "";
+    instructions: "You are an assistant that performs text-to-speech.",
+    input: `Repeat the following text verbatim: ${text}`,
+    store: false,
+  } as any);
+  const audioData = getOutputAudio(response).data;
   return Buffer.from(audioData, "base64");
 }
 
@@ -211,23 +225,20 @@ export async function textToSpeechStream(
   text: string,
   voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" = "alloy"
 ): Promise<AsyncIterable<string>> {
-  const stream = await openai.chat.completions.create({
+  const stream: any = await openai.responses.create({
     model: "gpt-audio",
     modalities: ["text", "audio"],
     audio: { voice, format: "pcm16" },
-    messages: [
-      { role: "system", content: "You are an assistant that performs text-to-speech." },
-      { role: "user", content: `Repeat the following text verbatim: ${text}` },
-    ],
+    instructions: "You are an assistant that performs text-to-speech.",
+    input: `Repeat the following text verbatim: ${text}`,
     stream: true,
-  });
+    store: false,
+  } as any);
 
   return (async function* () {
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta as any;
-      if (!delta) continue;
-      if (delta?.audio?.data) {
-        yield delta.audio.data;
+    for await (const event of stream) {
+      if (event.type === "response.audio.delta" && event.delta) {
+        yield event.delta;
       }
     }
   })();

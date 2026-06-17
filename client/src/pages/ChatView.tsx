@@ -82,6 +82,11 @@ export function ChatView() {
   }
 
   const hasMessages = conversation.messages && conversation.messages.length > 0;
+  const optimisticAlreadyPersisted = !!optimisticMessage && conversation.messages.some((msg) =>
+    msg.role === "user" && msg.content.trim() === optimisticMessage.trim()
+  );
+  const showOptimisticMessage =
+    (optimisticMessage || optimisticFiles.length > 0) && !optimisticAlreadyPersisted;
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#fcfdfd] relative overflow-hidden">
@@ -125,7 +130,7 @@ export function ChatView() {
           ))}
 
           {/* Optimistic User Message */}
-          {(optimisticMessage || optimisticFiles.length > 0) && (
+          {showOptimisticMessage && (
             <MessageBubble 
               role="user"
               content={optimisticMessage ?? ""}

@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: support-bot-helper-postgres-prod
+    environment:
+      POSTGRES_USER: supportbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supportbot-change-me}
+      POSTGRES_DB: supportbot
+    volumes:
+      - support-bot-helper-postgres-prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supportbot -d supportbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      target: production
+    container_name: support-bot-helper-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      PORT: 5000
+      DATABASE_URL: postgresql://supportbot:${POSTGRES_PASSWORD:-supportbot-change-me}@postgres:5432/supportbot
+    ports:
+      - "5002:5000"
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: builder
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: postgresql://supportbot:${POSTGRES_PASSWORD:-supportbot-change-me}@postgres:5432/supportbot
+    profiles:
+      - tools
+    command: ["npm", "run", "db:push"]
+
+volumes:
+  support-bot-helper-postgres-prod:

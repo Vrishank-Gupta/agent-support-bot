@@ -127,7 +127,10 @@ export function useChatStream(conversationId: number | null) {
         signal: abortControllerRef.current.signal,
       });
 
-      if (!response.ok) throw new Error("Failed to send message");
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to send message");
+      }
       if (!response.body) throw new Error("No response body");
 
       const reader = response.body.getReader();

@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.local
+.env
+.env.*
+!.env.example
+attached_assets
+*.tar.gz
+npm-debug.log
+Dockerfile
+docker-compose.yml
+docker-compose.production.yml

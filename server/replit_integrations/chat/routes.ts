@@ -9,13 +9,10 @@ import { readFileSync } from "fs";
 import path from "path";
 import { serializeSessionState } from "./sessionState";
 import { trimConversationHistory } from "./trimConversationHistory";
-import { searchKB as hybridSearchKB, buildKBQuery, embedKBArticle, backfillEmbeddings } from "./kbSearch";
+import { searchKB as hybridSearchKB, buildKBQuery, embedKBArticle, indexKBArticleChunks, backfillEmbeddings } from "./kbSearch";
+import type { KBArticle } from "./kbSearch";
+import { extractDocumentText } from "./documentExtraction";
 import type { FullSessionState } from "./sessionState";
-import * as pdfParseLib from "pdf-parse";
-import * as mammoth from "mammoth";
-import * as XLSX from "xlsx";
-// CJS interop: pdf-parse exports the function as default or as the module itself
-const pdf = (pdfParseLib as any).default ?? (pdfParseLib as any);
 import { chatStorage } from "./storage";
 import type { ConversationState } from "@shared/schema";
 import {
@@ -31,11 +28,412 @@ import {
 } from "./onedrive";
 
 const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || "missing-openai-key",
+  baseURL: process.env.OPENAI_API_KEY ? undefined : process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
+function hasOpenAIKey(): boolean {
+  return !!(process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY);
+}
+
+function extractResponseText(response: any): string {
+  if (typeof response?.output_text === "string") return response.output_text;
+  const parts: string[] = [];
+  for (const item of response?.output ?? []) {
+    for (const content of item?.content ?? []) {
+      if (content?.type === "output_text" && typeof content.text === "string") {
+        parts.push(content.text);
+      }
+    }
+  }
+  return parts.join("");
+}
+
+function toResponsesContent(content: any): any {
+  if (!Array.isArray(content)) return content ?? "";
+  return content.map((part) => {
+    if (part?.type === "text") {
+      return { type: "input_text", text: part.text ?? "" };
+    }
+    if (part?.type === "image_url") {
+      return {
+        type: "input_image",
+        image_url: part.image_url?.url ?? part.image_url ?? "",
+        detail: "auto",
+      };
+    }
+    return part;
+  });
+}
+
+function toResponsesInput(messages: Array<{ role: string; content: any }>): any[] {
+  return messages.map((message) => ({
+    role: message.role,
+    content: toResponsesContent(message.content),
+  }));
+}
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+function readNumberEnv(name: string, fallback: number): number {
+  const parsed = Number.parseFloat(process.env[name] ?? "");
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const KB_RESULT_LIMIT = Math.max(1, Math.floor(readNumberEnv("KB_RESULT_LIMIT", 3)));
+const MIN_KB_RELEVANCE_SCORE = Math.max(0, readNumberEnv("MIN_KB_RELEVANCE_SCORE", 0.05));
+const KB_FULL_DOC_CHAR_LIMIT = Math.max(1000, Math.floor(readNumberEnv("KB_FULL_DOC_CHAR_LIMIT", 3500)));
+const KB_CHUNK_CHAR_LIMIT = Math.max(1200, Math.floor(readNumberEnv("KB_CHUNK_CHAR_LIMIT", 2400)));
+const KB_CHUNKS_PER_ARTICLE = Math.max(1, Math.floor(readNumberEnv("KB_CHUNKS_PER_ARTICLE", 2)));
+const KB_TOTAL_CHAR_BUDGET = Math.max(KB_CHUNK_CHAR_LIMIT, Math.floor(readNumberEnv("KB_TOTAL_CHAR_BUDGET", 9000)));
+const PROMPT_CACHE_KEY = process.env.PROMPT_CACHE_KEY ?? "qubo-support-bot-v1";
+const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
+- Do not echo, quote, or restate the agent's latest message.
+- Start with the conclusion or next action. Avoid filler like "Since you said..." unless it adds new diagnostic value.
+- Never say "stage", "phase", "workflow", "state", "advance", or "next stage" to the agent.
+- If the issue is understood and SR/email is not yet known, ask directly: "Please share the customer's SR number or account email."
+- For troubleshooting, use this shape:
+  1. One short context sentence if needed.
+  2. One clear action.
+  3. One crisp outcome question.
+- Keep replies confident and compact. Prefer 2-4 short paragraphs or a tiny bullet list.
+- Never show internal stage names, state fields, retrieval details, or token/caching details.`;
+
+const stageNameMap: Record<string, FullSessionState["currentStage"]> = {
+  "device_context_collection": "device_settings_collection",
+  "analyse_and_route": "commissioning_check",
+  "kb_troubleshooting": "diagnose_troubleshoot",
+  "session_close": "close",
+};
+
+const stageOrder: FullSessionState["currentStage"][] = [
+  "issue_extraction",
+  "identifier_collection",
+  "device_settings_collection",
+  "commissioning_check",
+  "firmware_signal_check",
+  "diagnose_troubleshoot",
+  "close",
+];
+
+const kbActiveStages = new Set<FullSessionState["currentStage"]>([
+  "device_settings_collection",
+  "commissioning_check",
+  "firmware_signal_check",
+  "diagnose_troubleshoot",
+  "close",
+]);
+
+function normalizeStage(stage: string | null | undefined): FullSessionState["currentStage"] {
+  if (!stage) return "issue_extraction";
+  const mapped = stageNameMap[stage];
+  if (mapped) return mapped;
+  return stageOrder.includes(stage as FullSessionState["currentStage"])
+    ? stage as FullSessionState["currentStage"]
+    : "issue_extraction";
+}
+
+function isKBActiveStage(stage: string | null | undefined, kbOnlyMode = false): boolean {
+  return kbOnlyMode || kbActiveStages.has(normalizeStage(stage));
+}
+
+function stageTokenCap(stage: FullSessionState["currentStage"], kbOnlyMode: boolean): number {
+  if (stage === "issue_extraction") return 160;
+  if (stage === "identifier_collection") return 140;
+  if (stage === "device_settings_collection") return 260;
+  if (stage === "commissioning_check" || stage === "firmware_signal_check") return 320;
+  if (stage === "diagnose_troubleshoot") return kbOnlyMode ? 260 : 700;
+  return 180;
+}
+
+function buildStageScopedPrompt(basePrompt: string, stage: FullSessionState["currentStage"]): string {
+  const withoutState = basePrompt
+    .replace(/---\s*\n\s*SESSION STATE\s*\n\s*\{\{SESSION_STATE\}\}\s*\n\s*---/i, "---")
+    .replace(/\{\{SESSION_STATE\}\}/g, "")
+    .trim();
+
+  const stageHeading = `STAGE ${stageOrder.indexOf(stage) + 1}`;
+  const stageMatch = withoutState.match(new RegExp(`(^|\\n)${stageHeading}[^\\n]*[\\s\\S]*?(?=\\nSTAGE \\d|\\n---\\s*$|$)`, "i"));
+  const beforeStages = withoutState.split(/\nSTAGE 1/i)[0]?.trim() ?? withoutState;
+
+  if (!stageMatch) return withoutState;
+  return [
+    beforeStages,
+    "CURRENT STAGE INSTRUCTIONS",
+    stageMatch[0].trim(),
+  ].join("\n\n");
+}
+
+function isNegativeConfirmation(text: string): boolean {
+  return /\b(no|not|didn'?t|still|same|next|try next|not working|failed|issue remains)\b/i.test(text);
+}
+
+function isResolvedConfirmation(text: string): boolean {
+  return /\b(resolved|fixed|working now|works now|done|yes it worked|issue solved)\b/i.test(text);
+}
+
+function extractDeterministicStateFromMessage(
+  currentState: ConversationState | undefined,
+  text: string,
+): Partial<ConversationState> {
+  const updates: Partial<ConversationState> = {};
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  const sr = text.match(/\b(?:SR|ticket|case)[\s:#-]*([A-Z0-9-]{4,})\b/i)?.[1];
+  const firmware = text.match(/\b[A-Z]{2,}[A-Z0-9]*[_-]\d{2}[_-]\d{2}[_-]\d{2,}(?:[_-][A-Z]+)?\b/i)?.[0];
+
+  if (email && !currentState?.accountEmail) updates.accountEmail = email;
+  if (sr && !currentState?.srNumber) updates.srNumber = sr;
+  if (firmware && !currentState?.firmwareVersion) updates.firmwareVersion = firmware;
+  if (/\bdecommissioned\b/i.test(text)) updates.appConnectionStatus = "decommissioned";
+  else if (/\bcommissioned\b/i.test(text)) updates.appConnectionStatus = "commissioned";
+  if (/\boffline\b/i.test(text)) updates.signalStatus = "offline";
+  else if (/\bonline\b/i.test(text)) updates.signalStatus = "online";
+
+  if (/\b(no sr|no email|not available|customer.*(?:not|no).*email|sr.*not available)\b/i.test(text)) {
+    updates.kbOnlyMode = true;
+    updates.currentStage = "diagnose_troubleshoot";
+  }
+
+  const currentStage = normalizeStage(currentState?.currentStage);
+  if ((email || sr) && currentStage === "identifier_collection") {
+    updates.currentStage = "device_settings_collection";
+  }
+  if ((updates.signalStatus || updates.appConnectionStatus || firmware) && currentStage === "device_settings_collection") {
+    updates.currentStage = "commissioning_check";
+  }
+  if (updates.appConnectionStatus === "commissioned" && currentStage === "commissioning_check") {
+    updates.currentStage = "firmware_signal_check";
+  }
+  if (updates.appConnectionStatus === "decommissioned" && currentStage === "commissioning_check") {
+    updates.currentStage = "diagnose_troubleshoot";
+  }
+
+  return updates;
+}
+
+interface KBPromptArticle extends KBArticle {
+  injectedContent: string;
+  chunkNote: string;
+}
+
+interface KBChunk {
+  articleId: number;
+  index: number;
+  startLine: number;
+  content: string;
+  score: number;
+}
+
+function scoreTokens(text: string): string[] {
+  const stopWords = new Set([
+    "the", "and", "for", "with", "this", "that", "from", "have", "has",
+    "are", "you", "your", "then", "than", "into", "onto", "will", "can",
+    "device", "qubo", "step", "check", "please",
+  ]);
+
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter(token => token.length > 2 && !stopWords.has(token));
+}
+
+function splitKBContent(articleId: number, content: string): KBChunk[] {
+  if (content.length <= KB_FULL_DOC_CHAR_LIMIT) {
+    return [{ articleId, index: 0, startLine: 1, content, score: 0 }];
+  }
+
+  const chunks: KBChunk[] = [];
+  const lines = content.split(/\r?\n/);
+  let buffer: string[] = [];
+  let bufferStartLine = 1;
+
+  const pushBuffer = () => {
+    const chunkText = buffer.join("\n").trim();
+    if (!chunkText) return;
+
+    if (chunkText.length <= KB_CHUNK_CHAR_LIMIT) {
+      chunks.push({ articleId, index: chunks.length, startLine: bufferStartLine, content: chunkText, score: 0 });
+      buffer = [];
+      return;
+    }
+
+    for (let offset = 0; offset < chunkText.length; offset += KB_CHUNK_CHAR_LIMIT) {
+      chunks.push({
+        articleId,
+        index: chunks.length,
+        startLine: bufferStartLine,
+        content: chunkText.slice(offset, offset + KB_CHUNK_CHAR_LIMIT).trim(),
+        score: 0,
+      });
+    }
+    buffer = [];
+  };
+
+  lines.forEach((line, lineIndex) => {
+    const trimmed = line.trim();
+    const isBoundary = /^(\d+\.|step\s+\d+|#{1,6}\s+|[-*]\s+step\s+\d+)/i.test(trimmed);
+    const nextLength = buffer.join("\n").length + line.length + 1;
+
+    if (buffer.length > 0 && (nextLength > KB_CHUNK_CHAR_LIMIT || (isBoundary && nextLength > KB_CHUNK_CHAR_LIMIT * 0.45))) {
+      pushBuffer();
+      bufferStartLine = lineIndex + 1;
+    }
+
+    if (buffer.length === 0) bufferStartLine = lineIndex + 1;
+    buffer.push(line);
+  });
+
+  pushBuffer();
+  return chunks;
+}
+
+function scoreKBChunk(chunk: KBChunk, query: string, sessionState: Partial<FullSessionState>): number {
+  const queryTokens = new Set(scoreTokens([
+    query,
+    sessionState.issue,
+    sessionState.productCategory,
+    sessionState.modelNumber,
+    sessionState.deviceStatus,
+    sessionState.commissioningStatus,
+    sessionState.softwareVersion,
+    ...(sessionState.disabledFeatures ?? []),
+  ].filter(Boolean).join(" ")));
+
+  if (queryTokens.size === 0) return 0;
+
+  const chunkTokens = scoreTokens(chunk.content);
+  let score = 0;
+  for (const token of chunkTokens) {
+    if (queryTokens.has(token)) score += 1;
+  }
+
+  const expectedStep = (sessionState.currentKbStepIndex ?? 0) + 1;
+  if (sessionState.currentStage === "diagnose_troubleshoot") {
+    const stepPattern = new RegExp(`(^|\\n)\\s*(step\\s+${expectedStep}|${expectedStep}\\.)\\b`, "i");
+    if (stepPattern.test(chunk.content)) score += 25;
+    if (chunk.content.toLowerCase().includes("troubleshoot")) score += 3;
+  }
+
+  return score / Math.max(20, chunkTokens.length);
+}
+
+function buildChunkedKBArticles(
+  articles: KBArticle[],
+  query: string,
+  sessionState: Partial<FullSessionState>,
+): KBPromptArticle[] {
+  let remainingBudget = KB_TOTAL_CHAR_BUDGET;
+
+  return articles.map((article) => {
+    if (remainingBudget <= 0) {
+      return {
+        ...article,
+        injectedContent: "",
+        chunkNote: "No content injected because KB prompt budget was exhausted.",
+      };
+    }
+
+    if (article.content.length <= KB_FULL_DOC_CHAR_LIMIT) {
+      const injectedContent = article.content.slice(0, remainingBudget);
+      remainingBudget -= injectedContent.length;
+      return {
+        ...article,
+        injectedContent,
+        chunkNote: "Full article injected.",
+      };
+    }
+
+    const chunks = splitKBContent(article.id, article.content)
+      .map(chunk => ({ ...chunk, score: scoreKBChunk(chunk, query, sessionState) }));
+
+    const selected = chunks
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .slice(0, KB_CHUNKS_PER_ARTICLE)
+      .sort((a, b) => a.index - b.index);
+
+    const injectedParts: string[] = [];
+    for (const chunk of selected) {
+      if (remainingBudget <= 0) break;
+      const available = Math.min(remainingBudget, KB_CHUNK_CHAR_LIMIT);
+      const content = chunk.content.slice(0, available);
+      injectedParts.push(`[Chunk ${chunk.index + 1}, starts near line ${chunk.startLine}]\n${content}`);
+      remainingBudget -= content.length;
+    }
+
+    return {
+      ...article,
+      injectedContent: injectedParts.join("\n\n"),
+      chunkNote: `Chunked article: injected ${injectedParts.length} of ${chunks.length} chunks.`,
+    };
+  }).filter(article => article.injectedContent.trim().length > 0);
+}
+
+function sanitizeStateUpdates(
+  currentState: ConversationState | undefined,
+  updates: Record<string, unknown>,
+): Record<string, unknown> {
+  const clean: Record<string, unknown> = {};
+  const allowedKeys = new Set([
+    "issue", "productCategory", "modelNumber", "srNumber", "accountEmail",
+    "kbOnlyMode", "appConnectionStatus", "signalStatus", "firmwareVersion",
+    "firmwareStatus", "featuresDisabled", "troubleshootingIndex", "currentStage",
+  ]);
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (allowedKeys.has(key)) clean[key] = value;
+  }
+
+  if (typeof clean.issue !== "string" && clean.issue !== null) delete clean.issue;
+  if (typeof clean.productCategory !== "string" && clean.productCategory !== null) delete clean.productCategory;
+  if (typeof clean.modelNumber !== "string" && clean.modelNumber !== null) delete clean.modelNumber;
+  if (typeof clean.srNumber !== "string" && clean.srNumber !== null) delete clean.srNumber;
+  if (typeof clean.accountEmail !== "string" && clean.accountEmail !== null) delete clean.accountEmail;
+  if (typeof clean.kbOnlyMode !== "boolean") delete clean.kbOnlyMode;
+  if (!["commissioned", "decommissioned", null].includes(clean.appConnectionStatus as any)) delete clean.appConnectionStatus;
+  if (!["online", "offline", null].includes(clean.signalStatus as any)) delete clean.signalStatus;
+  if (typeof clean.firmwareVersion !== "string" && clean.firmwareVersion !== null) delete clean.firmwareVersion;
+  if (!["ok", "outdated", "unknown", null].includes(clean.firmwareStatus as any)) delete clean.firmwareStatus;
+  if (!Array.isArray(clean.featuresDisabled)) delete clean.featuresDisabled;
+  if (typeof clean.troubleshootingIndex !== "number") delete clean.troubleshootingIndex;
+
+  for (const key of ["issue", "productCategory", "modelNumber", "srNumber", "accountEmail", "firmwareVersion"]) {
+    if (typeof clean[key] === "string" && clean[key].trim().length === 0) {
+      delete clean[key];
+    }
+  }
+
+  const currentStage = normalizeStage(currentState?.currentStage);
+  const requestedStage = clean.currentStage ? normalizeStage(String(clean.currentStage)) : currentStage;
+  const currentIndex = stageOrder.indexOf(currentStage);
+  const requestedIndex = stageOrder.indexOf(requestedStage);
+  const nextStage = stageOrder[Math.min(currentIndex + 1, stageOrder.length - 1)];
+  const hasIssue = typeof clean.issue === "string" || !!currentState?.issue;
+  const kbOnlyMode = clean.kbOnlyMode === true || currentState?.kbOnlyMode === true;
+  const canSkipToDiagnose =
+    kbOnlyMode ||
+    (currentStage === "commissioning_check" && clean.appConnectionStatus === "decommissioned");
+
+  if (requestedIndex < currentIndex) {
+    delete clean.currentStage;
+  } else if (requestedStage === currentStage) {
+    clean.currentStage = requestedStage;
+  } else if (canSkipToDiagnose && requestedStage === "diagnose_troubleshoot") {
+    clean.currentStage = requestedStage;
+  } else if (currentStage === "issue_extraction" && requestedStage === "identifier_collection" && !hasIssue) {
+    clean.currentStage = currentStage;
+  } else if (requestedStage === nextStage) {
+    clean.currentStage = requestedStage;
+  } else {
+    clean.currentStage = nextStage;
+  }
+
+  if (kbOnlyMode && ["device_settings_collection", "commissioning_check", "firmware_signal_check"].includes(clean.currentStage as string)) {
+    clean.currentStage = "diagnose_troubleshoot";
+  }
+
+  return clean;
+}
 
 // ── Attachment in-memory store (transient, cleared after use) ────────────────
 interface AttachmentData {
@@ -63,14 +461,6 @@ async function extractVideoFrame(buffer: Buffer): Promise<string | null> {
   } finally {
     await Promise.all([fs.unlink(tmpIn).catch(() => {}), fs.unlink(tmpOut).catch(() => {})]);
   }
-}
-
-function excelToText(buffer: Buffer): string {
-  const wb = XLSX.read(buffer, { type: "buffer" });
-  return wb.SheetNames.map((name: string) => {
-    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
-    return `Sheet: ${name}\n${csv}`;
-  }).join("\n\n");
 }
 
 // ── Search helpers ──────────────────────────────────────────────────────
@@ -146,6 +536,7 @@ function searchKBKeyword(
 async function embedKB(id: number, title: string, content: string): Promise<void> {
   try {
     await embedKBArticle(id, title, content);
+    await indexKBArticleChunks(id, content);
   } catch (err: any) {
     console.warn("[embedKB] Embedding failed (non-fatal):", err.message);
   }
@@ -227,12 +618,9 @@ async function extractAndSaveState(
       troubleshootingIndex: currentState?.troubleshootingIndex ?? 0,
     });
 
-    const extraction = await openai.chat.completions.create({
+    const extraction = await openai.responses.create({
       model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `You extract conversation state updates from a Hero Electronix support chat exchange.
+      instructions: `You extract conversation state updates from a Hero Electronix support chat exchange.
 
 Given the current state, the agent's message, and the assistant's response, return ONLY a JSON object with fields that changed or were newly extracted. Omit unchanged fields.
 
@@ -266,22 +654,58 @@ Rules:
 - If unsure whether a stage is complete, keep the current stage.
 
 Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanation.`,
+      input: `Current state:\n${stateSnapshot}\n\nAgent message:\n${userMessage}\n\nAssistant response:\n${assistantResponse}\n\nReturn JSON with only changed/new fields:`,
+      temperature: 0,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "conversation_state_updates",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              issue: { type: ["string", "null"] },
+              productCategory: { type: ["string", "null"] },
+              modelNumber: { type: ["string", "null"] },
+              srNumber: { type: ["string", "null"] },
+              accountEmail: { type: ["string", "null"] },
+              kbOnlyMode: { type: ["boolean", "null"] },
+              appConnectionStatus: { type: ["string", "null"], enum: ["commissioned", "decommissioned", null] },
+              signalStatus: { type: ["string", "null"], enum: ["online", "offline", null] },
+              firmwareVersion: { type: ["string", "null"] },
+              firmwareStatus: { type: ["string", "null"], enum: ["ok", "outdated", "unknown", null] },
+              featuresDisabled: { type: ["array", "null"], items: { type: "string" } },
+              troubleshootingIndex: { type: ["integer", "null"] },
+              currentStage: {
+                type: ["string", "null"],
+                enum: ["issue_extraction", "identifier_collection", "device_settings_collection", "commissioning_check", "firmware_signal_check", "diagnose_troubleshoot", "close", null],
+              },
+            },
+            required: [
+              "issue", "productCategory", "modelNumber", "srNumber", "accountEmail",
+              "kbOnlyMode", "appConnectionStatus", "signalStatus", "firmwareVersion",
+              "firmwareStatus", "featuresDisabled", "troubleshootingIndex", "currentStage",
+            ],
+          },
         },
-        {
-          role: "user",
-          content: `Current state:\n${stateSnapshot}\n\nAgent message:\n${userMessage}\n\nAssistant response:\n${assistantResponse}\n\nReturn JSON with only changed/new fields:`,
-        },
-      ],
-      max_completion_tokens: 400,
+      } as any,
+      max_output_tokens: 400,
+      store: false,
     });
 
-    const raw = (extraction.choices[0]?.message?.content ?? "{}").trim()
+    const raw = (extractResponseText(extraction) || "{}").trim()
       .replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
 
-    const updates = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    const updates = Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => value !== null),
+    );
     if (updates && typeof updates === "object" && Object.keys(updates).length > 0) {
-      await chatStorage.upsertConversationState(conversationId, updates);
-      console.log(`[state] conv ${conversationId} updated:`, JSON.stringify(updates));
+      const safeUpdates = sanitizeStateUpdates(currentState, updates);
+      if (Object.keys(safeUpdates).length === 0) return;
+      await chatStorage.upsertConversationState(conversationId, safeUpdates);
+      console.log(`[state] conv ${conversationId} updated:`, JSON.stringify(safeUpdates));
     }
   } catch (e: any) {
     console.error("[state-extract] Error:", e.message);
@@ -515,23 +939,6 @@ export function registerChatRoutes(app: Express): void {
           attachment.kind = "image";
           attachment.base64DataUrl = `data:${mimetype};base64,${buffer.toString("base64")}`;
 
-        } else if (mimetype === "application/pdf") {
-          const parsed = await pdf(buffer);
-          attachment.extractedText = parsed.text?.slice(0, 40000) ?? "";
-
-        } else if (
-          mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-          mimetype === "application/msword"
-        ) {
-          const result = await mammoth.extractRawText({ buffer });
-          attachment.extractedText = result.value?.slice(0, 40000) ?? "";
-
-        } else if (
-          mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-          mimetype === "application/vnd.ms-excel"
-        ) {
-          attachment.extractedText = excelToText(buffer).slice(0, 40000);
-
         } else if (mimetype.startsWith("video/")) {
           attachment.kind = "video_frame";
           const frame = await extractVideoFrame(buffer);
@@ -544,7 +951,8 @@ export function registerChatRoutes(app: Express): void {
           }
 
         } else {
-          return res.status(415).json({ error: `Unsupported file type: ${mimetype}` });
+          const extracted = await extractDocumentText(buffer, originalname, mimetype, 40000);
+          attachment.extractedText = extracted.text;
         }
 
         attachmentStore.set(id, attachment);
@@ -559,9 +967,9 @@ export function registerChatRoutes(app: Express): void {
           kind: attachment.kind,
           hasPreview: !!attachment.base64DataUrl,
         });
-      } catch (error) {
+      } catch (error: any) {
         console.error("Attachment upload error:", error);
-        res.status(500).json({ error: "Failed to process attachment" });
+        res.status(422).json({ error: error?.message ?? "Failed to extract readable text from attachment" });
       }
     }
   );
@@ -720,21 +1128,9 @@ export function registerChatRoutes(app: Express): void {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
       const { originalname, mimetype, buffer } = req.file;
-      let content = "";
       const title = `OneDrive: ${originalname}`;
-
-      if (mimetype === "application/pdf" || originalname.endsWith(".pdf")) {
-        const parsed = await pdf(buffer);
-        content = parsed.text.slice(0, 50000);
-      } else if (mimetype === "text/plain" || originalname.endsWith(".txt") || originalname.endsWith(".md")) {
-        content = buffer.toString("utf-8").slice(0, 50000);
-      } else {
-        content = buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
-      }
-
-      if (!content.trim()) {
-        return res.status(422).json({ error: "Could not extract text from file. Please try a .txt or .pdf file." });
-      }
+      const extracted = await extractDocumentText(buffer, originalname, mimetype, 50000);
+      const content = extracted.text;
 
       let productCategories: string[] = [];
       let modelNumbers: string[] = [];
@@ -745,10 +1141,17 @@ export function registerChatRoutes(app: Express): void {
 
       const kb = await chatStorage.createKB({ title, content: content.trim(), type: "onedrive", productCategories, modelNumbers });
       embedKB(kb.id, kb.title, kb.content); // async, fire-and-forget
-      res.status(201).json(kb);
-    } catch (error) {
+      res.status(201).json({
+        ...kb,
+        extraction: {
+          method: extracted.method,
+          originalLength: extracted.originalLength,
+          truncated: extracted.truncated,
+        },
+      });
+    } catch (error: any) {
       console.error("File upload error:", error);
-      res.status(500).json({ error: "Failed to process file" });
+      res.status(422).json({ error: error?.message ?? "Failed to extract readable text from file" });
     }
   });
 
@@ -964,6 +1367,13 @@ export function registerChatRoutes(app: Express): void {
       const conversationId = parseInt(req.params.id as string);
       const { content, attachmentIds } = req.body;
 
+      if (!hasOpenAIKey()) {
+        return res.status(503).json({
+          error: "OpenAI API key is not configured. Add OPENAI_API_KEY to .env and restart the server.",
+          code: "openai_key_missing",
+        });
+      }
+
       // Resolve any uploaded attachments
       const attachments: AttachmentData[] = ((attachmentIds ?? []) as string[])
         .map(id => attachmentStore.get(id))
@@ -979,20 +1389,33 @@ export function registerChatRoutes(app: Express): void {
 
       // 1. Load conversation state — drives stage-aware search and prompt injection
       const state = await chatStorage.getConversationState(conversationId);
+      const deterministicUpdates = sanitizeStateUpdates(state, extractDeterministicStateFromMessage(state, userDisplayContent));
+      const effectiveState = { ...(state ?? {}), ...deterministicUpdates } as ConversationState;
+      if (Object.keys(deterministicUpdates).length > 0) {
+        chatStorage.upsertConversationState(conversationId, deterministicUpdates as any).catch(() => {});
+      }
+      const normalizedStage = normalizeStage(effectiveState.currentStage);
+      const kbOnlyMode = effectiveState.kbOnlyMode ?? false;
+      const inKBStage = isKBActiveStage(normalizedStage, kbOnlyMode);
 
       // 2. Device-state-aware hybrid KB search — marries SR/device data to KB articles
-      const stateForSearch: Partial<FullSessionState> = {
-        modelNumber: state?.modelNumber ?? null,
-        productCategory: state?.productCategory ?? null,
-        issue: state?.issue ?? null,
-        deviceStatus: (state?.signalStatus as any) ?? null,
-        commissioningStatus: (state?.appConnectionStatus as any) ?? null,
-        firmwareOutdated: state?.firmwareStatus === "outdated" ? true : state?.firmwareStatus === "ok" ? false : null,
-        signalWeak: (state as any)?.signalWeak ?? null,
-        disabledFeatures: state?.featuresDisabled ?? [],
-      };
-      const kbSearchQuery = buildKBQuery(stateForSearch, content || attachments.map(a => a.filename).join(" "));
-      const topArticles = await hybridSearchKB(kbSearchQuery, { limit: 3 });
+      let topArticles: Awaited<ReturnType<typeof hybridSearchKB>> = [];
+      let kbSearchQuery = content || attachments.map(a => a.filename).join(" ");
+      if (inKBStage) {
+        const stateForSearch: Partial<FullSessionState> = {
+          modelNumber: effectiveState.modelNumber ?? null,
+          productCategory: effectiveState.productCategory ?? null,
+          issue: effectiveState.issue ?? null,
+          deviceStatus: (effectiveState.signalStatus as any) ?? null,
+          commissioningStatus: (effectiveState.appConnectionStatus as any) ?? null,
+          firmwareOutdated: effectiveState.firmwareStatus === "outdated" ? true : effectiveState.firmwareStatus === "ok" ? false : null,
+          signalWeak: (effectiveState as any)?.signalWeak ?? null,
+          disabledFeatures: effectiveState.featuresDisabled ?? [],
+        };
+        kbSearchQuery = buildKBQuery(stateForSearch, kbSearchQuery);
+        const searchResults = await hybridSearchKB(kbSearchQuery, { limit: KB_RESULT_LIMIT });
+        topArticles = searchResults.filter(article => Number.isFinite(article.score) && article.score >= MIN_KB_RELEVANCE_SCORE);
+      }
       const kbArticlesFound = topArticles.length > 0;
       const kbStepTotal = kbArticlesFound
         ? (topArticles[0].content.match(/^\s*(\d+\.|step\s+\d+)/gim) ?? []).length
@@ -1051,109 +1474,103 @@ export function registerChatRoutes(app: Express): void {
 
       // 3. Build system prompt — inject CURRENT SESSION STATE block at the top
       const savedPrompt = await chatStorage.getSetting("system_prompt");
-      const basePrompt = savedPrompt ?? DEFAULT_SYSTEM_PROMPT;
+      const basePrompt = buildStageScopedPrompt(savedPrompt ?? DEFAULT_SYSTEM_PROMPT, normalizedStage);
 
       // Normalize old stage names → new stage names so the prompt always sees consistent values
-      const stageNameMap: Record<string, string> = {
-        "device_context_collection": "device_settings_collection",
-        "analyse_and_route":         "commissioning_check",
-        "kb_troubleshooting":        "diagnose_troubleshoot",
-        "session_close":             "close",
-      };
-      const rawStage = state?.currentStage ?? "issue_extraction";
-      const normalizedStage = stageNameMap[rawStage] ?? rawStage;
-
       const sessionState = {
         currentStage: normalizedStage,
-        kbOnlyMode: state?.kbOnlyMode ?? false,
-        issue: state?.issue ?? null,
-        productCategory: state?.productCategory ?? null,
-        srNumber: state?.srNumber ?? null,
-        accountEmail: state?.accountEmail ?? null,
-        deviceStatus: state?.signalStatus ?? null,
-        commissioningStatus: state?.appConnectionStatus ?? null,
-        softwareVersion: state?.firmwareVersion ?? null,
-        lastOtaDate: (state as any)?.lastOtaDate ?? null,
-        rssi: (state as any)?.rssi ?? null,
-        disabledFeatures: state?.featuresDisabled ?? [],
-        modelNumber: state?.modelNumber ?? null,
-        firmwareOutdated: state?.firmwareStatus === "outdated" ? true : state?.firmwareStatus === "ok" ? false : null,
-        signalWeak: (state as any)?.signalWeak ?? null,
-        kbDocTitle: (state as any)?.kbDocTitle ?? null,
-        kbDocLink: (state as any)?.kbDocLink ?? null,
+        kbOnlyMode,
+        issue: effectiveState.issue ?? null,
+        productCategory: effectiveState.productCategory ?? null,
+        srNumber: effectiveState.srNumber ?? null,
+        accountEmail: effectiveState.accountEmail ?? null,
+        deviceStatus: effectiveState.signalStatus ?? null,
+        commissioningStatus: effectiveState.appConnectionStatus ?? null,
+        softwareVersion: effectiveState.firmwareVersion ?? null,
+        lastOtaDate: (effectiveState as any)?.lastOtaDate ?? null,
+        rssi: (effectiveState as any)?.rssi ?? null,
+        disabledFeatures: effectiveState.featuresDisabled ?? [],
+        modelNumber: effectiveState.modelNumber ?? null,
+        firmwareOutdated: effectiveState.firmwareStatus === "outdated" ? true : effectiveState.firmwareStatus === "ok" ? false : null,
+        signalWeak: (effectiveState as any)?.signalWeak ?? null,
+        kbDocTitle: (effectiveState as any)?.kbDocTitle ?? null,
+        kbDocLink: (effectiveState as any)?.kbDocLink ?? null,
         kbArticlesFound,
         kbStepTotal,
-        currentKbStepIndex: state?.troubleshootingIndex ?? 0,
-        diagnosisBriefingDone: (state?.troubleshootingIndex ?? 0) > 0,
+        currentKbStepIndex: effectiveState.troubleshootingIndex ?? 0,
+        diagnosisBriefingDone: (effectiveState.troubleshootingIndex ?? 0) > 0,
       };
+      const promptArticles = kbArticlesFound
+        ? buildChunkedKBArticles(topArticles, kbSearchQuery, sessionState as Partial<FullSessionState>)
+        : [];
 
       // Stage-gated KB injection — load KB once device data has arrived (Stage 3+)
       // device_context_collection included: commissioning/firmware checks need KB immediately after device data
-      const kbActiveStages = [
-        // new stage names
-        "device_settings_collection", "commissioning_check", "firmware_signal_check",
-        "diagnose_troubleshoot", "close",
-        // legacy stage names (old sessions in DB)
-        "device_context_collection", "analyse_and_route", "kb_troubleshooting", "session_close",
-      ];
-      const inKBStage = kbActiveStages.includes(sessionState.currentStage) || sessionState.kbOnlyMode;
-
       let kbSection: string;
       if (!inKBStage) {
         kbSection = `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
-      } else if (!kbArticlesFound) {
+      } else if (!kbArticlesFound || promptArticles.length === 0) {
         kbSection = `\n\nKNOWLEDGE BASE: No exact articles found for this query.\n(kbArticlesFound = false — use your best expert knowledge about Qubo devices to give a helpful possible answer. Never refuse or say you cannot help.)`;
       } else {
         kbSection = [
           `\n\nRETRIEVED KB ARTICLES — FOLLOW THESE EXACTLY IN ORDER`,
           `Do not use any knowledge outside these articles for troubleshooting steps.`,
-          `Total articles retrieved: ${topArticles.length}\n`,
-          ...topArticles.map((art, i) =>
-            `--- KB ARTICLE ${i + 1} OF ${topArticles.length} ---\n` +
+          `Long articles may be chunked. Use only the injected article text; never invent missing steps.`,
+          `Total articles retrieved: ${promptArticles.length}\n`,
+          ...promptArticles.map((art, i) =>
+            `--- KB ARTICLE ${i + 1} OF ${promptArticles.length} ---\n` +
             `Title: ${art.title}${art.sourceUrl ? `\nSource: ${art.sourceUrl}` : ""}\n` +
-            art.content
+            `Injection: ${art.chunkNote}\n` +
+            art.injectedContent
           ),
         ].join("\n");
       }
 
       // Stage-gated state serialization — only sends fields relevant to current stage (~30% token saving)
-      const systemPromptWithState = (basePrompt.includes("{{SESSION_STATE}}")
-        ? basePrompt.replace("{{SESSION_STATE}}", serializeSessionState(sessionState as Partial<FullSessionState>))
-        : `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}\n\n${basePrompt}`) + kbSection;
+      const systemPromptWithState = [
+        basePrompt,
+        RESPONSE_STYLE_GUARD,
+        `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}`,
+        kbSection,
+      ].join("\n\n");
 
       // Trim history to cap token growth on long sessions (keeps last 6 turns verbatim)
       chatMessages = trimConversationHistory(chatMessages as any) as typeof chatMessages;
-
-      chatMessages.unshift({
-        role: "system",
-        content: systemPromptWithState,
-      });
+      const responseInput = toResponsesInput(chatMessages as any);
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      const stream = await openai.chat.completions.create({
+      const stream: any = await openai.responses.create({
         model: "gpt-4o-mini",
-        messages: chatMessages as any,
+        instructions: systemPromptWithState,
+        input: responseInput,
         stream: true,
-        stream_options: { include_usage: true },
-        max_completion_tokens: 8192,
-      });
+        temperature: 0,
+        max_output_tokens: stageTokenCap(normalizedStage, kbOnlyMode),
+        prompt_cache_key: PROMPT_CACHE_KEY,
+        prompt_cache_retention: "in_memory",
+        store: false,
+        truncation: "auto",
+      } as any);
 
       let fullResponse = "";
       let promptTokens = 0;
       let completionTokens = 0;
 
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta?.content || "";
-        if (delta) {
-          fullResponse += delta;
-          res.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
-        }
-        if (chunk.usage) {
-          promptTokens = chunk.usage.prompt_tokens ?? 0;
-          completionTokens = chunk.usage.completion_tokens ?? 0;
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta" && event.delta) {
+          fullResponse += event.delta;
+          res.write(`data: ${JSON.stringify({ content: event.delta })}\n\n`);
+        } else if (event.type === "response.completed") {
+          const usage = event.response?.usage;
+          promptTokens = usage?.input_tokens ?? 0;
+          completionTokens = usage?.output_tokens ?? 0;
+        } else if (event.type === "response.failed") {
+          throw new Error(event.response?.error?.message ?? "Responses API request failed");
+        } else if (event.type === "error") {
+          throw new Error(event.message ?? "Responses API stream error");
         }
       }
 
@@ -1170,14 +1587,19 @@ export function registerChatRoutes(app: Express): void {
       res.end();
 
       // 4. Fire-and-forget state extraction — runs after response is sent, zero client latency impact
-      extractAndSaveState(conversationId, state, content, fullResponse).catch(() => {});
+      extractAndSaveState(conversationId, effectiveState, content, fullResponse).catch(() => {});
 
       // 5. Server-side KB step index increment — reliable counter independent of state extractor
       // Fires whenever the session was already in diagnose_troubleshoot at the START of this request
-      if (state?.currentStage === "diagnose_troubleshoot" || normalizedStage === "diagnose_troubleshoot") {
-        chatStorage.upsertConversationState(conversationId, {
-          troubleshootingIndex: (state?.troubleshootingIndex ?? 0) + 1,
-        }).catch(() => {});
+      if (effectiveState.currentStage === "diagnose_troubleshoot" || normalizedStage === "diagnose_troubleshoot") {
+        const reply = String(content ?? "");
+        if (isResolvedConfirmation(reply)) {
+          chatStorage.upsertConversationState(conversationId, { currentStage: "close" }).catch(() => {});
+        } else if (isNegativeConfirmation(reply)) {
+          chatStorage.upsertConversationState(conversationId, {
+            troubleshootingIndex: (effectiveState.troubleshootingIndex ?? 0) + 1,
+          }).catch(() => {});
+        }
       }
 
     } catch (error) {

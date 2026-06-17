@@ -20,7 +20,7 @@ export function registerAudioRoutes(app: Express): void {
   // Get single conversation with messages
   app.get("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id), 10);
       const conversation = await chatStorage.getConversation(id);
       if (!conversation) {
         return res.status(404).json({ error: "Conversation not found" });
@@ -48,7 +48,7 @@ export function registerAudioRoutes(app: Express): void {
   // Delete conversation
   app.delete("/api/conversations/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id), 10);
       await chatStorage.deleteConversation(id);
       res.status(204).send();
     } catch (error) {
@@ -62,7 +62,7 @@ export function registerAudioRoutes(app: Express): void {
   // Uses gpt-4o-mini-transcribe for STT, gpt-audio for voice response
   app.post("/api/conversations/:id/messages", audioBodyParser, async (req: Request, res: Response) => {
     try {
-      const conversationId = parseInt(req.params.id);
+      const conversationId = parseInt(String(req.params.id), 10);
       const { audio, voice = "alloy" } = req.body;
 
       if (!audio) {
@@ -94,27 +94,25 @@ export function registerAudioRoutes(app: Express): void {
       res.write(`data: ${JSON.stringify({ type: "user_transcript", data: userTranscript })}\n\n`);
 
       // 6. Stream audio response from gpt-audio
-      const stream = await openai.chat.completions.create({
+      const stream: any = await openai.responses.create({
         model: "gpt-audio",
         modalities: ["text", "audio"],
         audio: { voice, format: "pcm16" },
-        messages: chatHistory,
+        input: chatHistory,
         stream: true,
-      });
+        store: false,
+      } as any);
 
       let assistantTranscript = "";
 
-      for await (const chunk of stream) {
-        const delta = chunk.choices?.[0]?.delta as any;
-        if (!delta) continue;
-
-        if (delta?.audio?.transcript) {
-          assistantTranscript += delta.audio.transcript;
-          res.write(`data: ${JSON.stringify({ type: "transcript", data: delta.audio.transcript })}\n\n`);
+      for await (const event of stream) {
+        if (event.type === "response.audio.transcript.delta" && event.delta) {
+          assistantTranscript += event.delta;
+          res.write(`data: ${JSON.stringify({ type: "transcript", data: event.delta })}\n\n`);
         }
 
-        if (delta?.audio?.data) {
-          res.write(`data: ${JSON.stringify({ type: "audio", data: delta.audio.data })}\n\n`);
+        if (event.type === "response.audio.delta" && event.delta) {
+          res.write(`data: ${JSON.stringify({ type: "audio", data: event.delta })}\n\n`);
         }
       }
 

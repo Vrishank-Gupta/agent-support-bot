@@ -55,8 +55,8 @@ export function MessageBubble({ role, content, sources, createdAt, isStreaming, 
   const hasFiles = optimisticFiles && optimisticFiles.length > 0;
 
   return (
-    <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"} mb-6 group`}>
-      <div className={`flex max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"} gap-4`}>
+    <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"} mb-5 group`}>
+      <div className={`flex ${isUser ? "max-w-[78%] flex-row-reverse" : "max-w-[82%] flex-row"} gap-3`}>
         
         {/* Avatar */}
         <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center shadow-sm border ${
@@ -69,10 +69,15 @@ export function MessageBubble({ role, content, sources, createdAt, isStreaming, 
 
         {/* Message Content */}
         <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
-          <div className={`px-5 py-3.5 rounded-2xl shadow-sm text-sm ${
+          {!isUser && (
+            <div className="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Support guidance
+            </div>
+          )}
+          <div className={`px-5 py-4 rounded-2xl text-[15px] ${
             isUser 
-              ? "bg-primary text-primary-foreground rounded-tr-sm" 
-              : "bg-white border border-border/50 text-foreground rounded-tl-sm"
+              ? "bg-primary text-primary-foreground rounded-tr-sm shadow-sm"
+              : "bg-white border border-slate-200 text-slate-900 rounded-tl-sm shadow-[0_8px_24px_rgba(15,23,42,0.06)]"
           }`}>
             {isUser ? (
               <div className="flex flex-col gap-2">
@@ -88,10 +93,19 @@ export function MessageBubble({ role, content, sources, createdAt, isStreaming, 
                 {content && <div className="whitespace-pre-wrap">{content}</div>}
               </div>
             ) : (
-              <div className="prose prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-muted/50 prose-pre:text-foreground prose-a:text-primary">
+              <div className="prose prose-sm max-w-none prose-p:my-0 prose-p:leading-7 prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:pl-1 prose-strong:text-slate-950 prose-pre:bg-muted/50 prose-pre:text-foreground prose-a:text-primary">
                 {content ? (
                   <>
-                    <ReactMarkdown>{content}</ReactMarkdown>
+                    <ReactMarkdown
+                      components={{
+                        p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+                        ul: ({ children }) => <ul className="my-3 list-disc pl-5 space-y-1">{children}</ul>,
+                        ol: ({ children }) => <ol className="my-3 list-decimal pl-5 space-y-1">{children}</ol>,
+                        li: ({ children }) => <li className="pl-1 leading-7">{children}</li>,
+                      }}
+                    >
+                      {content}
+                    </ReactMarkdown>
                     {sources && sources.length > 0 && (
                       <div className="mt-4 pt-4 border-t border-border/50">
                         <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1">

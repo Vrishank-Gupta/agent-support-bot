@@ -32,6 +32,16 @@ export const knowledgeBase = pgTable("knowledge_base", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const knowledgeBaseChunks = pgTable("knowledge_base_chunks", {
+  id: serial("id").primaryKey(),
+  knowledgeBaseId: integer("knowledge_base_id").notNull().references(() => knowledgeBase.id, { onDelete: "cascade" }),
+  chunkIndex: integer("chunk_index").notNull(),
+  stepNumber: integer("step_number"),
+  content: text("content").notNull(),
+  embedding: real("embedding").array(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const whitelistedUsers = pgTable("whitelisted_users", {
   id: serial("id").primaryKey(),
   email: text("email").notNull().unique(),
@@ -81,6 +91,7 @@ export const conversationState = pgTable("conversation_state", {
 export const insertConversationSchema = createInsertSchema(conversations).omit({ id: true, createdAt: true });
 export const insertMessageSchema = createInsertSchema(messages).omit({ id: true, createdAt: true });
 export const insertKnowledgeBaseSchema = createInsertSchema(knowledgeBase).omit({ id: true, updatedAt: true });
+export const insertKnowledgeBaseChunkSchema = createInsertSchema(knowledgeBaseChunks).omit({ id: true, updatedAt: true });
 export const insertWhitelistedUserSchema = createInsertSchema(whitelistedUsers).omit({ id: true, createdAt: true });
 export const insertTokenUsageSchema = createInsertSchema(tokenUsage).omit({ id: true, createdAt: true });
 export const insertConversationStateSchema = createInsertSchema(conversationState).omit({ updatedAt: true });
@@ -92,6 +103,8 @@ export type Message = typeof messages.$inferSelect;
 export type InsertMessage = z.infer<typeof insertMessageSchema>;
 export type KnowledgeBase = typeof knowledgeBase.$inferSelect;
 export type InsertKnowledgeBase = z.infer<typeof insertKnowledgeBaseSchema>;
+export type KnowledgeBaseChunk = typeof knowledgeBaseChunks.$inferSelect;
+export type InsertKnowledgeBaseChunk = z.infer<typeof insertKnowledgeBaseChunkSchema>;
 export type WhitelistedUser = typeof whitelistedUsers.$inferSelect;
 export type InsertWhitelistedUser = z.infer<typeof insertWhitelistedUserSchema>;
 export type TokenUsage = typeof tokenUsage.$inferSelect;

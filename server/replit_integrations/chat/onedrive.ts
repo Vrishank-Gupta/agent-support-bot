@@ -3,10 +3,7 @@
  * Uses client credentials flow — requires MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET.
  */
 
-import * as mammoth from "mammoth";
-import * as pdfParseLib from "pdf-parse";
-// CJS interop: pdf-parse exports the function as default or as the module itself
-const pdfParse = (pdfParseLib as any).default ?? (pdfParseLib as any);
+import { extractDocumentText } from "./documentExtraction";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -184,22 +181,8 @@ export async function extractFileContent(file: OdFileItem, upn: string): Promise
     buffer = await fetchBuffer(url);
   }
 
-  if (name.endsWith(".pdf")) {
-    const parsed = await pdfParse(buffer);
-    return parsed.text.slice(0, 50000);
-  }
-
-  if (name.endsWith(".docx") || name.endsWith(".doc")) {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value.slice(0, 50000);
-  }
-
-  if (name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".csv")) {
-    return buffer.toString("utf-8").slice(0, 50000);
-  }
-
-  // Try plain text as fallback
-  return buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
+  const extracted = await extractDocumentText(buffer, file.name, file.mimeType, 50000);
+  return extracted.text;
 }
 
 /** Check whether MS credentials are configured. */
@@ -434,19 +417,6 @@ export async function extractSharedFileContent(item: SharingLinkItem): Promise<s
 
 /** Shared text extraction helper used by both flows */
 export async function extractTextFromBuffer(buffer: Buffer, name: string): Promise<string> {
-  const lower = name.toLowerCase();
-
-  if (lower.endsWith(".pdf")) {
-    const parsed = await pdfParse(buffer);
-    return parsed.text.slice(0, 50000);
-  }
-  if (lower.endsWith(".docx") || lower.endsWith(".doc")) {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value.slice(0, 50000);
-  }
-  if (lower.endsWith(".txt") || lower.endsWith(".md") || lower.endsWith(".csv")) {
-    return buffer.toString("utf-8").slice(0, 50000);
-  }
-  // Generic fallback
-  return buffer.toString("utf-8").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
+  const extracted = await extractDocumentText(buffer, name, "", 50000);
+  return extracted.text;
 }
