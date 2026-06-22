@@ -102,6 +102,7 @@ const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
 const stageNameMap: Record<string, FullSessionState["currentStage"]> = {
   "device_context_collection": "device_settings_collection",
   "analyse_and_route": "commissioning_check",
+  "firmware_signal_check": "kb_match",
   "kb_troubleshooting": "diagnose_troubleshoot",
   "session_close": "close",
 };
@@ -109,17 +110,17 @@ const stageNameMap: Record<string, FullSessionState["currentStage"]> = {
 const stageOrder: FullSessionState["currentStage"][] = [
   "issue_extraction",
   "identifier_collection",
-  "device_settings_collection",
   "commissioning_check",
-  "firmware_signal_check",
+  "kb_match",
+  "device_settings_collection",
   "diagnose_troubleshoot",
   "close",
 ];
 
 const kbActiveStages = new Set<FullSessionState["currentStage"]>([
-  "device_settings_collection",
   "commissioning_check",
-  "firmware_signal_check",
+  "kb_match",
+  "device_settings_collection",
   "diagnose_troubleshoot",
   "close",
 ]);
@@ -140,28 +141,30 @@ function isKBActiveStage(stage: string | null | undefined, kbOnlyMode = false): 
 function stageTokenCap(stage: FullSessionState["currentStage"], kbOnlyMode: boolean): number {
   if (stage === "issue_extraction") return 160;
   if (stage === "identifier_collection") return 140;
-  if (stage === "device_settings_collection") return 260;
-  if (stage === "commissioning_check" || stage === "firmware_signal_check") return 320;
+  if (stage === "commissioning_check") return 220;
+  if (stage === "kb_match" || stage === "device_settings_collection") return 320;
   if (stage === "diagnose_troubleshoot") return kbOnlyMode ? 260 : 700;
   return 180;
 }
 
 function buildStageScopedPrompt(basePrompt: string, stage: FullSessionState["currentStage"]): string {
   const withoutState = basePrompt
-    .replace(/---\s*\n\s*SESSION STATE\s*\n\s*\{\{SESSION_STATE\}\}\s*\n\s*---/i, "---")
+    .replace(/#\s*SESSION STATE\s*\n+\s*\{\{SESSION_STATE\}\}/i, "")
     .replace(/\{\{SESSION_STATE\}\}/g, "")
     .trim();
 
   const stageHeading = `STAGE ${stageOrder.indexOf(stage) + 1}`;
-  const stageMatch = withoutState.match(new RegExp(`(^|\\n)${stageHeading}[^\\n]*[\\s\\S]*?(?=\\nSTAGE \\d|\\n---\\s*$|$)`, "i"));
-  const beforeStages = withoutState.split(/\nSTAGE 1/i)[0]?.trim() ?? withoutState;
+  const nextStageNumber = stageOrder.indexOf(stage) + 2;
+  const stageMatch = withoutState.match(new RegExp(
+    `(^|\\n)#{1,3}\\s*${stageHeading}[^\\n]*[\\s\\S]*?(?=\\n#{1,3}\\s*STAGE ${nextStageNumber}(?:[A-Z])?\\b|$)`,
+    "i",
+  ));
+  const beforeStages = withoutState.split(/\n#{1,3}\s*Stage Blocks/i)[0]?.trim() ?? withoutState;
 
   if (!stageMatch) return withoutState;
   return [
-    beforeStages,
-    "CURRENT STAGE INSTRUCTIONS",
-    stageMatch[0].trim(),
-  ].join("\n\n");
+    beforeStages.replace(/\{\{STAGE_BLOCK\}\}/g, stageMatch[0].trim()),
+  ].join("\n\n").trim();
 }
 
 function isNegativeConfirmation(text: string): boolean {
@@ -196,13 +199,10 @@ function extractDeterministicStateFromMessage(
 
   const currentStage = normalizeStage(currentState?.currentStage);
   if ((email || sr) && currentStage === "identifier_collection") {
-    updates.currentStage = "device_settings_collection";
-  }
-  if ((updates.signalStatus || updates.appConnectionStatus || firmware) && currentStage === "device_settings_collection") {
     updates.currentStage = "commissioning_check";
   }
   if (updates.appConnectionStatus === "commissioned" && currentStage === "commissioning_check") {
-    updates.currentStage = "firmware_signal_check";
+    updates.currentStage = "kb_match";
   }
   if (updates.appConnectionStatus === "decommissioned" && currentStage === "commissioning_check") {
     updates.currentStage = "diagnose_troubleshoot";
@@ -428,7 +428,7 @@ function sanitizeStateUpdates(
     clean.currentStage = nextStage;
   }
 
-  if (kbOnlyMode && ["device_settings_collection", "commissioning_check", "firmware_signal_check"].includes(clean.currentStage as string)) {
+  if (kbOnlyMode && ["commissioning_check", "kb_match", "device_settings_collection"].includes(clean.currentStage as string)) {
     clean.currentStage = "diagnose_troubleshoot";
   }
 
@@ -640,16 +640,16 @@ Valid field names and types:
 - currentStage: one of the following stage identifiers:
     "issue_extraction"         → bot has not yet understood the issue
     "identifier_collection"    → bot understood the issue, now collecting SR/email
-    "device_settings_collection" → bot has SR/email, now collecting Zoho device settings
-    "commissioning_check"      → bot has device settings, now checking commissioning status
-    "firmware_signal_check"    → commissioned, now checking firmware version and RSSI
-    "diagnose_troubleshoot"    → firmware/signal checked, now in diagnostic briefing + KB steps
+    "commissioning_check"      → bot has SR/email, now checking whether the device is commissioned
+    "kb_match"                 → commissioned, now selecting a relevant KB article
+    "device_settings_collection" → KB matched, now collecting only settings required by its steps
+    "diagnose_troubleshoot"    → settings collected or unnecessary, now in diagnostic briefing + KB steps
     "close"                    → issue resolved, session closing
 
 Rules:
 - Advance currentStage only when the assistant has explicitly completed that stage's goal.
-- EXCEPTION: If kbOnlyMode becomes true (SR/email not available), set currentStage to "diagnose_troubleshoot" immediately — skip device_settings_collection, commissioning_check, firmware_signal_check entirely.
-- If kbOnlyMode is already true, never set currentStage to device_settings_collection, commissioning_check, or firmware_signal_check.
+- EXCEPTION: If kbOnlyMode becomes true (SR/email not available), set currentStage to "diagnose_troubleshoot" immediately — skip commissioning_check, kb_match, and device_settings_collection entirely.
+- If kbOnlyMode is already true, never set currentStage to commissioning_check, kb_match, or device_settings_collection.
 - Never go backwards.
 - If unsure whether a stage is complete, keep the current stage.
 
@@ -679,7 +679,7 @@ Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanatio
               troubleshootingIndex: { type: ["integer", "null"] },
               currentStage: {
                 type: ["string", "null"],
-                enum: ["issue_extraction", "identifier_collection", "device_settings_collection", "commissioning_check", "firmware_signal_check", "diagnose_troubleshoot", "close", null],
+                enum: ["issue_extraction", "identifier_collection", "commissioning_check", "kb_match", "device_settings_collection", "diagnose_troubleshoot", "close", null],
               },
             },
             required: [
@@ -1510,7 +1510,7 @@ export function registerChatRoutes(app: Express): void {
       if (!inKBStage) {
         kbSection = `\n\n[KB articles are not loaded yet. Do NOT guess or provide troubleshooting steps. Follow your stage instructions first.]`;
       } else if (!kbArticlesFound || promptArticles.length === 0) {
-        kbSection = `\n\nKNOWLEDGE BASE: No exact articles found for this query.\n(kbArticlesFound = false — use your best expert knowledge about Qubo devices to give a helpful possible answer. Never refuse or say you cannot help.)`;
+        kbSection = `\n\nKNOWLEDGE BASE: No sufficiently relevant articles found for this query.\n(kbArticlesFound = false — do not guess or improvise troubleshooting. Ask for one useful clarifying detail and retry retrieval.)`;
       } else {
         kbSection = [
           `\n\nRETRIEVED KB ARTICLES — FOLLOW THESE EXACTLY IN ORDER`,

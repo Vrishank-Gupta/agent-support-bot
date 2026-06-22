@@ -14,9 +14,9 @@
 export type Stage =
   | "issue_extraction"
   | "identifier_collection"
-  | "device_settings_collection"
   | "commissioning_check"
-  | "firmware_signal_check"
+  | "kb_match"
+  | "device_settings_collection"
   | "diagnose_troubleshoot"
   | "close";
 
@@ -73,7 +73,7 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         productCategory: state.productCategory,
       });
 
-    case "device_settings_collection":
+    case "commissioning_check":
       return JSON.stringify({
         ...base,
         issue: state.issue,
@@ -83,7 +83,7 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         modelNumber: state.modelNumber ?? null,
       });
 
-    case "commissioning_check":
+    case "kb_match":
       return JSON.stringify({
         ...base,
         issue: state.issue,
@@ -96,9 +96,10 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         lastOtaDate: state.lastOtaDate,
         rssi: state.rssi,
         disabledFeatures: state.disabledFeatures ?? [],
+        kbArticlesFound: state.kbArticlesFound ?? false,
       });
 
-    case "firmware_signal_check":
+    case "device_settings_collection":
       return JSON.stringify({
         ...base,
         issue: state.issue,
@@ -112,6 +113,7 @@ export function serializeSessionState(state: Partial<FullSessionState>): string 
         disabledFeatures: state.disabledFeatures ?? [],
         firmwareOutdated: state.firmwareOutdated ?? null,
         signalWeak: state.signalWeak ?? null,
+        kbArticlesFound: state.kbArticlesFound ?? false,
       });
 
     case "diagnose_troubleshoot":
