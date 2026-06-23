@@ -91,7 +91,6 @@ const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
 - Do not echo, quote, or restate the agent's latest message.
 - Start with the conclusion or next action. Avoid filler like "Since you said..." unless it adds new diagnostic value.
 - Never say "stage", "phase", "workflow", "state", "advance", or "next stage" to the agent.
-- If the issue is understood and SR/email is not yet known, ask directly: "Please share the customer's SR number or account email."
 - For troubleshooting, use this shape:
   1. One short context sentence if needed.
   2. One clear action.
@@ -191,11 +190,6 @@ function extractDeterministicStateFromMessage(
   else if (/\bcommissioned\b/i.test(text)) updates.appConnectionStatus = "commissioned";
   if (/\boffline\b/i.test(text)) updates.signalStatus = "offline";
   else if (/\bonline\b/i.test(text)) updates.signalStatus = "online";
-
-  if (/\b(no sr|no email|not available|customer.*(?:not|no).*email|sr.*not available)\b/i.test(text)) {
-    updates.kbOnlyMode = true;
-    updates.currentStage = "diagnose_troubleshoot";
-  }
 
   const currentStage = normalizeStage(currentState?.currentStage);
   if ((email || sr) && currentStage === "identifier_collection") {
@@ -597,6 +591,7 @@ async function extractAndSaveState(
   currentState: ConversationState | undefined,
   userMessage: string,
   assistantResponse: string,
+  activeStagePrompt: string,
 ): Promise<void> {
   try {
     const stateSnapshot = JSON.stringify({
@@ -622,7 +617,9 @@ async function extractAndSaveState(
       model: "gpt-4o-mini",
       instructions: `You extract conversation state updates from a Hero Electronix support chat exchange.
 
-Given the current state, the agent's message, and the assistant's response, return ONLY a JSON object with fields that changed or were newly extracted. Omit unchanged fields.
+The ACTIVE PROMPT supplied in the input is the sole authority for stage requirements and exceptions. Do not impose an identifier requirement or exception that is not present in that prompt.
+
+Given the active prompt, current state, the agent's message, and the assistant's response, return ONLY a JSON object with fields that changed or were newly extracted. Omit unchanged fields.
 
 Valid field names and types:
 - issue: string | null  (the customer's problem description)
@@ -630,7 +627,7 @@ Valid field names and types:
 - modelNumber: string | null  (e.g. "HCP06", "Q1")
 - srNumber: string | null  (Zoho SR number)
 - accountEmail: string | null
-- kbOnlyMode: boolean  (true when no SR/email available)
+- kbOnlyMode: boolean  (set according to the active prompt's routing rules)
 - appConnectionStatus: "commissioned" | "decommissioned" | null  (device commissioning status from Zoho CRM)
 - signalStatus: "online" | "offline" | null  (device online/offline status)
 - firmwareVersion: string | null  (software version string, e.g. "HCP06_01_01_93_SYSTEM")
@@ -639,7 +636,7 @@ Valid field names and types:
 - troubleshootingIndex: integer  (increment by 1 each time a KB troubleshooting step is completed)
 - currentStage: one of the following stage identifiers:
     "issue_extraction"         → bot has not yet understood the issue
-    "identifier_collection"    → bot understood the issue, now collecting SR/email
+    "identifier_collection"    → bot understood the issue, now applying the active prompt's identifier rules
     "commissioning_check"      → bot has SR/email, now checking whether the device is commissioned
     "kb_match"                 → commissioned, now selecting a relevant KB article
     "device_settings_collection" → KB matched, now collecting only settings required by its steps
@@ -648,13 +645,15 @@ Valid field names and types:
 
 Rules:
 - Advance currentStage only when the assistant has explicitly completed that stage's goal.
-- EXCEPTION: If kbOnlyMode becomes true (SR/email not available), set currentStage to "diagnose_troubleshoot" immediately — skip commissioning_check, kb_match, and device_settings_collection entirely.
+- Apply identifier requirements, exceptions, and routing exactly as written in the ACTIVE PROMPT.
+- If the ACTIVE PROMPT says the issue does not require an identifier, mark the identifier stage complete and apply any routing or kbOnlyMode instruction stated there.
+- If kbOnlyMode becomes true, set currentStage to "diagnose_troubleshoot" immediately — skip commissioning_check, kb_match, and device_settings_collection entirely.
 - If kbOnlyMode is already true, never set currentStage to commissioning_check, kb_match, or device_settings_collection.
 - Never go backwards.
 - If unsure whether a stage is complete, keep the current stage.
 
 Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanation.`,
-      input: `Current state:\n${stateSnapshot}\n\nAgent message:\n${userMessage}\n\nAssistant response:\n${assistantResponse}\n\nReturn JSON with only changed/new fields:`,
+      input: `ACTIVE PROMPT:\n${activeStagePrompt}\n\nCurrent state:\n${stateSnapshot}\n\nAgent message:\n${userMessage}\n\nAssistant response:\n${assistantResponse}\n\nReturn JSON with only changed/new fields:`,
       temperature: 0,
       text: {
         format: {
@@ -1587,7 +1586,7 @@ export function registerChatRoutes(app: Express): void {
       res.end();
 
       // 4. Fire-and-forget state extraction — runs after response is sent, zero client latency impact
-      extractAndSaveState(conversationId, effectiveState, content, fullResponse).catch(() => {});
+      extractAndSaveState(conversationId, effectiveState, content, fullResponse, basePrompt).catch(() => {});
 
       // 5. Server-side KB step index increment — reliable counter independent of state extractor
       // Fires whenever the session was already in diagnose_troubleshoot at the START of this request
