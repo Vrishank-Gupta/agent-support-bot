@@ -80,6 +80,15 @@ function readNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .map(item => typeof item === "string" ? item.trim() : "")
+      .filter(Boolean),
+  ));
+}
+
 const KB_RESULT_LIMIT = Math.max(1, Math.floor(readNumberEnv("KB_RESULT_LIMIT", 3)));
 const MIN_KB_RELEVANCE_SCORE = Math.max(0, readNumberEnv("MIN_KB_RELEVANCE_SCORE", 0.05));
 const KB_FULL_DOC_CHAR_LIMIT = Math.max(1000, Math.floor(readNumberEnv("KB_FULL_DOC_CHAR_LIMIT", 3500)));
@@ -88,14 +97,16 @@ const KB_CHUNKS_PER_ARTICLE = Math.max(1, Math.floor(readNumberEnv("KB_CHUNKS_PE
 const KB_TOTAL_CHAR_BUDGET = Math.max(KB_CHUNK_CHAR_LIMIT, Math.floor(readNumberEnv("KB_TOTAL_CHAR_BUDGET", 9000)));
 const PROMPT_CACHE_KEY = process.env.PROMPT_CACHE_KEY ?? "qubo-support-bot-v1";
 const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
+- Match the agent's language and script. If the agent writes Hinglish/Hindi in Roman script, reply in natural Hinglish/Roman Hindu. If the agent writes English, reply in English.
 - Do not echo, quote, or restate the agent's latest message.
 - Start with the conclusion or next action. Avoid filler like "Since you said..." unless it adds new diagnostic value.
 - Never say "stage", "phase", "workflow", "state", "advance", or "next stage" to the agent.
-- For troubleshooting, use this shape:
-  1. One short context sentence if needed.
-  2. One clear action.
-  3. One crisp outcome question.
-- Keep replies confident and compact. Prefer 2-4 short paragraphs or a tiny bullet list.
+- If the issue could match multiple SOPs, ask focused clarifying questions — one at a time, up to 3 total — until you are confident about the right SOP. Once confident, move directly into the solution.
+- Clarifying questions are not troubleshooting replies: do not end a clarifying question with a check-in.
+- Clarifying questions must be question-only. Do not include action verbs such as "check", "try", "restart", "open", or "go to" before the question.
+- Troubleshooting steps should read like a knowledgeable colleague talking — one clear action, then a brief natural check-in. Vary the check-in phrasing.
+- Never say "Step skipped" unless the exact skipped feature appears in the SESSION STATE disabledFeatures array.
+- Keep replies confident and concise. No emoji headers, no numbered lists for individual steps.
 - Never show internal stage names, state fields, retrieval details, or token/caching details.`;
 
 const stageNameMap: Record<string, FullSessionState["currentStage"]> = {
@@ -138,12 +149,12 @@ function isKBActiveStage(stage: string | null | undefined, kbOnlyMode = false): 
 }
 
 function stageTokenCap(stage: FullSessionState["currentStage"], kbOnlyMode: boolean): number {
-  if (stage === "issue_extraction") return 160;
-  if (stage === "identifier_collection") return 140;
-  if (stage === "commissioning_check") return 220;
-  if (stage === "kb_match" || stage === "device_settings_collection") return 320;
-  if (stage === "diagnose_troubleshoot") return kbOnlyMode ? 260 : 700;
-  return 180;
+  if (stage === "issue_extraction") return 250;
+  if (stage === "identifier_collection") return 200;
+  if (stage === "commissioning_check") return 300;
+  if (stage === "kb_match" || stage === "device_settings_collection") return 400;
+  if (stage === "diagnose_troubleshoot") return kbOnlyMode ? 350 : 700;
+  return 250;
 }
 
 function buildStageScopedPrompt(basePrompt: string, stage: FullSessionState["currentStage"]): string {
@@ -167,7 +178,7 @@ function buildStageScopedPrompt(basePrompt: string, stage: FullSessionState["cur
 }
 
 function isNegativeConfirmation(text: string): boolean {
-  return /\b(no|not|didn'?t|still|same|next|try next|not working|failed|issue remains)\b/i.test(text);
+  return /\b(no|didn'?t|still|same|next|try next|not working|failed|issue remains|nahi chala|nhi chala)\b/i.test(text);
 }
 
 function isResolvedConfirmation(text: string): boolean {
@@ -186,21 +197,18 @@ function extractDeterministicStateFromMessage(
   if (email && !currentState?.accountEmail) updates.accountEmail = email;
   if (sr && !currentState?.srNumber) updates.srNumber = sr;
   if (firmware && !currentState?.firmwareVersion) updates.firmwareVersion = firmware;
+  if (!currentState?.productCategory) {
+    if (/\b(camera|cam)\b/i.test(text)) updates.productCategory = "Camera";
+    else if (/\b(doorbell|video\s*doorbell)\b/i.test(text)) updates.productCategory = "Video Doorbell";
+    else if (/\b(lock|door\s*lock)\b/i.test(text)) updates.productCategory = "Door Lock";
+    else if (/\b(purifier|air\s*purifier)\b/i.test(text)) updates.productCategory = "Air Purifier";
+    else if (/\b(dashcam|dash\s*cam|dashplay)\b/i.test(text)) updates.productCategory = "Dashcam";
+    else if (/\b(tracker|gps)\b/i.test(text)) updates.productCategory = "GPS Tracker";
+  }
   if (/\bdecommissioned\b/i.test(text)) updates.appConnectionStatus = "decommissioned";
   else if (/\bcommissioned\b/i.test(text)) updates.appConnectionStatus = "commissioned";
   if (/\boffline\b/i.test(text)) updates.signalStatus = "offline";
   else if (/\bonline\b/i.test(text)) updates.signalStatus = "online";
-
-  const currentStage = normalizeStage(currentState?.currentStage);
-  if ((email || sr) && currentStage === "identifier_collection") {
-    updates.currentStage = "commissioning_check";
-  }
-  if (updates.appConnectionStatus === "commissioned" && currentStage === "commissioning_check") {
-    updates.currentStage = "kb_match";
-  }
-  if (updates.appConnectionStatus === "decommissioned" && currentStage === "commissioning_check") {
-    updates.currentStage = "diagnose_troubleshoot";
-  }
 
   return updates;
 }
@@ -363,6 +371,28 @@ function buildChunkedKBArticles(
   }).filter(article => article.injectedContent.trim().length > 0);
 }
 
+function rerankKBArticlesForState(
+  articles: KBArticle[],
+  sessionState: Partial<FullSessionState>,
+): KBArticle[] {
+  const product = sessionState.productCategory?.toLowerCase() ?? "";
+  const model = sessionState.modelNumber?.toLowerCase() ?? "";
+
+  return articles
+    .map(article => {
+      const title = article.title.toLowerCase();
+      const content = article.content.toLowerCase();
+      const text = `${title}\n${content}`;
+      let boost = 0;
+
+      if (product && text.includes(product)) boost += 0.08;
+      if (model && text.includes(model)) boost += 0.12;
+
+      return { ...article, score: article.score + boost };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
 function sanitizeStateUpdates(
   currentState: ConversationState | undefined,
   updates: Record<string, unknown>,
@@ -412,6 +442,8 @@ function sanitizeStateUpdates(
     delete clean.currentStage;
   } else if (requestedStage === currentStage) {
     clean.currentStage = requestedStage;
+  } else if (kbOnlyMode && requestedStage === "kb_match") {
+    clean.currentStage = requestedStage;
   } else if (canSkipToDiagnose && requestedStage === "diagnose_troubleshoot") {
     clean.currentStage = requestedStage;
   } else if (currentStage === "issue_extraction" && requestedStage === "identifier_collection" && !hasIssue) {
@@ -422,7 +454,7 @@ function sanitizeStateUpdates(
     clean.currentStage = nextStage;
   }
 
-  if (kbOnlyMode && ["commissioning_check", "kb_match", "device_settings_collection"].includes(clean.currentStage as string)) {
+  if (kbOnlyMode && ["commissioning_check", "device_settings_collection"].includes(clean.currentStage as string)) {
     clean.currentStage = "diagnose_troubleshoot";
   }
 
@@ -592,6 +624,7 @@ async function extractAndSaveState(
   userMessage: string,
   assistantResponse: string,
   activeStagePrompt: string,
+  canAdvanceTroubleshootingIndex = false,
 ): Promise<void> {
   try {
     const stateSnapshot = JSON.stringify({
@@ -647,8 +680,9 @@ Rules:
 - Advance currentStage only when the assistant has explicitly completed that stage's goal.
 - Apply identifier requirements, exceptions, and routing exactly as written in the ACTIVE PROMPT.
 - If the ACTIVE PROMPT says the issue does not require an identifier, mark the identifier stage complete and apply any routing or kbOnlyMode instruction stated there.
-- If kbOnlyMode becomes true, set currentStage to "diagnose_troubleshoot" immediately — skip commissioning_check, kb_match, and device_settings_collection entirely.
-- If kbOnlyMode is already true, never set currentStage to commissioning_check, kb_match, or device_settings_collection.
+- If kbOnlyMode becomes true, set currentStage to "kb_match" first so the assistant can ask one clarifying question using retrieved SOP candidates.
+- If kbOnlyMode is already true and currentStage is "kb_match", move to "diagnose_troubleshoot" only after the agent answers the clarifying question.
+- If kbOnlyMode is already true, never set currentStage to commissioning_check or device_settings_collection.
 - Never go backwards.
 - If unsure whether a stage is complete, keep the current stage.
 
@@ -702,6 +736,9 @@ Return {} if nothing changed. Return ONLY valid JSON, no markdown, no explanatio
     );
     if (updates && typeof updates === "object" && Object.keys(updates).length > 0) {
       const safeUpdates = sanitizeStateUpdates(currentState, updates);
+      if ("troubleshootingIndex" in safeUpdates && (!canAdvanceTroubleshootingIndex || !isNegativeConfirmation(userMessage))) {
+        delete safeUpdates.troubleshootingIndex;
+      }
       if (Object.keys(safeUpdates).length === 0) return;
       await chatStorage.upsertConversationState(conversationId, safeUpdates);
       console.log(`[state] conv ${conversationId} updated:`, JSON.stringify(safeUpdates));
@@ -1217,6 +1254,8 @@ export function registerChatRoutes(app: Express): void {
 
     const masterLink = await chatStorage.getSetting("sharepoint_master_link");
     if (!masterLink) return res.status(400).json({ error: "No SharePoint master link configured. Save one first." });
+    const defaultProductCategories = normalizeStringArray(req.body?.productCategories);
+    const defaultModelNumbers = normalizeStringArray(req.body?.modelNumbers);
 
     try {
       const files = await listSharedFolder(masterLink);
@@ -1244,7 +1283,15 @@ export function registerChatRoutes(app: Express): void {
           if (!newContent.trim()) { results.errors.push(`${file.name}: empty content`); continue; }
 
           if (existing) {
-            const updated = await chatStorage.updateKB(existing.id, { content: newContent.trim() });
+            const metadataPatch = {
+              ...(existing.productCategories.length === 0 && defaultProductCategories.length > 0
+                ? { productCategories: defaultProductCategories }
+                : {}),
+              ...(existing.modelNumbers.length === 0 && defaultModelNumbers.length > 0
+                ? { modelNumbers: defaultModelNumbers }
+                : {}),
+            };
+            const updated = await chatStorage.updateKB(existing.id, { content: newContent.trim(), ...metadataPatch });
             embedKB(existing.id, updated.title, updated.content);
             results.updated++;
           } else {
@@ -1252,8 +1299,8 @@ export function registerChatRoutes(app: Express): void {
               title: `OneDrive: ${file.name}`,
               content: newContent.trim(),
               type: "onedrive",
-              productCategories: [],
-              modelNumbers: [],
+              productCategories: defaultProductCategories,
+              modelNumbers: defaultModelNumbers,
               sourceUrl: masterLink,
             });
             embedKB(kb.id, kb.title, kb.content);
@@ -1345,7 +1392,9 @@ export function registerChatRoutes(app: Express): void {
   // ── SharePoint master link settings ──────────────────────────
   app.get("/api/settings/sharepoint-master-link", async (req: Request, res: Response) => {
     const link = await chatStorage.getSetting("sharepoint_master_link");
-    res.json({ link: link ?? "" });
+    const productCategories = JSON.parse(await chatStorage.getSetting("sharepoint_master_product_categories") ?? "[]");
+    const modelNumbers = JSON.parse(await chatStorage.getSetting("sharepoint_master_model_numbers") ?? "[]");
+    res.json({ link: link ?? "", productCategories, modelNumbers });
   });
 
   app.put("/api/settings/sharepoint-master-link", async (req: Request, res: Response) => {
@@ -1354,7 +1403,11 @@ export function registerChatRoutes(app: Express): void {
     const { link } = req.body;
     if (!link || typeof link !== "string") return res.status(400).json({ error: "link required" });
     await chatStorage.setSetting("sharepoint_master_link", link.trim());
-    res.json({ ok: true, link: link.trim() });
+    const productCategories = normalizeStringArray(req.body?.productCategories);
+    const modelNumbers = normalizeStringArray(req.body?.modelNumbers);
+    await chatStorage.setSetting("sharepoint_master_product_categories", JSON.stringify(productCategories));
+    await chatStorage.setSetting("sharepoint_master_model_numbers", JSON.stringify(modelNumbers));
+    res.json({ ok: true, link: link.trim(), productCategories, modelNumbers });
   });
 
   // ══════════════════════════════════════════════════
@@ -1391,7 +1444,7 @@ export function registerChatRoutes(app: Express): void {
       const deterministicUpdates = sanitizeStateUpdates(state, extractDeterministicStateFromMessage(state, userDisplayContent));
       const effectiveState = { ...(state ?? {}), ...deterministicUpdates } as ConversationState;
       if (Object.keys(deterministicUpdates).length > 0) {
-        chatStorage.upsertConversationState(conversationId, deterministicUpdates as any).catch(() => {});
+        await chatStorage.upsertConversationState(conversationId, deterministicUpdates as any);
       }
       const normalizedStage = normalizeStage(effectiveState.currentStage);
       const kbOnlyMode = effectiveState.kbOnlyMode ?? false;
@@ -1413,7 +1466,8 @@ export function registerChatRoutes(app: Express): void {
         };
         kbSearchQuery = buildKBQuery(stateForSearch, kbSearchQuery);
         const searchResults = await hybridSearchKB(kbSearchQuery, { limit: KB_RESULT_LIMIT });
-        topArticles = searchResults.filter(article => Number.isFinite(article.score) && article.score >= MIN_KB_RELEVANCE_SCORE);
+        topArticles = rerankKBArticlesForState(searchResults, stateForSearch)
+          .filter(article => Number.isFinite(article.score) && article.score >= MIN_KB_RELEVANCE_SCORE);
       }
       const kbArticlesFound = topArticles.length > 0;
       const kbStepTotal = kbArticlesFound
@@ -1434,7 +1488,7 @@ export function registerChatRoutes(app: Express): void {
           }
           if (title.length < raw.length) title += "…";
           const conv = await chatStorage.getConversation(conversationId);
-          if (conv && conv.title === "New Support Session") {
+          if (conv && ["New Support Session", "New Chat"].includes(conv.title)) {
             await chatStorage.updateConversationTitle(conversationId, title.charAt(0).toUpperCase() + title.slice(1));
           }
         }
@@ -1530,8 +1584,11 @@ export function registerChatRoutes(app: Express): void {
         basePrompt,
         RESPONSE_STYLE_GUARD,
         `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}`,
+        normalizedStage === "kb_match"
+          ? `KB MATCH CLARIFICATION RULE:\nYou are narrowing down to the right SOP. Ask one focused clarifying question per reply — up to 3 questions total across this conversation — until you are confident which SOP fits. Do not include action verbs such as "check", "try", "restart", "open", or "go to" in the question. Do not give a root cause, diagnostic briefing, or troubleshooting step until you have picked the SOP. Once you are confident, move directly into the solution — no need to announce which SOP you chose. Match the agent's language and script.`
+          : "",
         kbSection,
-      ].join("\n\n");
+      ].filter(Boolean).join("\n\n");
 
       // Trim history to cap token growth on long sessions (keeps last 6 turns verbatim)
       chatMessages = trimConversationHistory(chatMessages as any) as typeof chatMessages;
@@ -1546,7 +1603,7 @@ export function registerChatRoutes(app: Express): void {
         instructions: systemPromptWithState,
         input: responseInput,
         stream: true,
-        temperature: 0,
+        temperature: 0.4,
         max_output_tokens: stageTokenCap(normalizedStage, kbOnlyMode),
         prompt_cache_key: PROMPT_CACHE_KEY,
         prompt_cache_retention: "in_memory",
@@ -1586,11 +1643,18 @@ export function registerChatRoutes(app: Express): void {
       res.end();
 
       // 4. Fire-and-forget state extraction — runs after response is sent, zero client latency impact
-      extractAndSaveState(conversationId, effectiveState, content, fullResponse, basePrompt).catch(() => {});
+      extractAndSaveState(
+        conversationId,
+        effectiveState,
+        content,
+        fullResponse,
+        basePrompt,
+        normalizeStage(state?.currentStage) === "diagnose_troubleshoot",
+      ).catch(() => {});
 
       // 5. Server-side KB step index increment — reliable counter independent of state extractor
       // Fires whenever the session was already in diagnose_troubleshoot at the START of this request
-      if (effectiveState.currentStage === "diagnose_troubleshoot" || normalizedStage === "diagnose_troubleshoot") {
+      if (normalizeStage(state?.currentStage) === "diagnose_troubleshoot") {
         const reply = String(content ?? "");
         if (isResolvedConfirmation(reply)) {
           chatStorage.upsertConversationState(conversationId, { currentStage: "close" }).catch(() => {});

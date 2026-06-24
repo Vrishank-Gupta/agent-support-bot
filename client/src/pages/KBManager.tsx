@@ -180,6 +180,8 @@ export function KBManager() {
   // SharePoint master link sync state
   const [spMasterLink, setSpMasterLink] = useState("");
   const [spMasterLinkDraft, setSpMasterLinkDraft] = useState("");
+  const [spMasterTags, setSpMasterTags] = useState({ productCategories: [] as string[], modelNumbers: [] as string[] });
+  const [spMasterTagsDraft, setSpMasterTagsDraft] = useState({ productCategories: [] as string[], modelNumbers: [] as string[] });
   const [spLinkSaving, setSpLinkSaving] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
   const [syncResult, setSyncResult] = useState<{
@@ -189,16 +191,21 @@ export function KBManager() {
   const [syncError, setSyncError] = useState("");
 
   // Load stored master link on mount
-  const { data: spLinkData } = useQuery<{ link: string }>({ queryKey: ["/api/settings/sharepoint-master-link"] });
+  const { data: spLinkData } = useQuery<{ link: string; productCategories?: string[]; modelNumbers?: string[] }>({ queryKey: ["/api/settings/sharepoint-master-link"] });
 
   const handleSaveMasterLink = async () => {
     if (!spMasterLinkDraft.trim()) return;
     setSpLinkSaving(true);
     try {
-      await apiRequest("PUT", "/api/settings/sharepoint-master-link", { link: spMasterLinkDraft.trim() }, authHeaders);
+      await apiRequest("PUT", "/api/settings/sharepoint-master-link", {
+        link: spMasterLinkDraft.trim(),
+        productCategories: spMasterTagsDraft.productCategories,
+        modelNumbers: spMasterTagsDraft.modelNumbers,
+      }, authHeaders);
       setSpMasterLink(spMasterLinkDraft.trim());
+      setSpMasterTags(spMasterTagsDraft);
       queryClient.invalidateQueries({ queryKey: ["/api/settings/sharepoint-master-link"] });
-      toast({ title: "Master link saved" });
+      toast({ title: "Master link and metadata saved" });
     } catch (err: any) {
       toast({ title: "Save failed", description: err?.message, variant: "destructive" });
     } finally {
@@ -211,7 +218,7 @@ export function KBManager() {
     setSyncResult(null);
     setSyncError("");
     try {
-      const res = await apiRequest("POST", "/api/kb/sync-sharepoint", {}, authHeaders);
+      const res = await apiRequest("POST", "/api/kb/sync-sharepoint", spMasterTags, authHeaders);
       const result = await res.json() as {
         updated: number; added: number; removed: number;
         addedFiles: string[]; removedFiles: string[]; errors: string[]; total: number;
@@ -257,9 +264,21 @@ export function KBManager() {
   /* sync spLinkData into draft when it loads */
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const spLinkLoaded = spLinkData?.link ?? "";
-  if (spLinkLoaded && spMasterLink !== spLinkLoaded) {
+  const spTagsLoaded = {
+    productCategories: spLinkData?.productCategories ?? [],
+    modelNumbers: spLinkData?.modelNumbers ?? [],
+  };
+  if (
+    spLinkLoaded &&
+    (
+      spMasterLink !== spLinkLoaded ||
+      JSON.stringify(spMasterTags) !== JSON.stringify(spTagsLoaded)
+    )
+  ) {
     setSpMasterLink(spLinkLoaded);
     setSpMasterLinkDraft(spLinkLoaded);
+    setSpMasterTags(spTagsLoaded);
+    setSpMasterTagsDraft(spTagsLoaded);
   }
 
   /* file upload with tags */
@@ -541,13 +560,40 @@ export function KBManager() {
                   <Button
                     variant="outline"
                     onClick={handleSaveMasterLink}
-                    disabled={spLinkSaving || !spMasterLinkDraft.trim() || spMasterLinkDraft === spMasterLink}
+                    disabled={
+                      spLinkSaving ||
+                      !spMasterLinkDraft.trim() ||
+                      (
+                        spMasterLinkDraft === spMasterLink &&
+                        JSON.stringify(spMasterTagsDraft) === JSON.stringify(spMasterTags)
+                      )
+                    }
                     data-testid="button-save-master-link"
                   >
                     {spLinkSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     <span className="ml-1.5">Save</span>
                   </Button>
                 </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <TagInput
+                    label="Common Product Categories"
+                    placeholder="e.g. Camera"
+                    values={spMasterTagsDraft.productCategories}
+                    onChange={v => setSpMasterTagsDraft(t => ({ ...t, productCategories: v }))}
+                    testId="input-sp-master-categories"
+                  />
+                  <TagInput
+                    label="Common Model Numbers"
+                    placeholder="e.g. HCP06"
+                    values={spMasterTagsDraft.modelNumbers}
+                    onChange={v => setSpMasterTagsDraft(t => ({ ...t, modelNumbers: v }))}
+                    testId="input-sp-master-models"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  These tags are applied to every new document imported from this master link, and to existing synced documents only when their tags are blank.
+                </p>
 
                 {spMasterLink && (
                   <div className="flex items-center justify-between p-3 rounded-lg bg-green-50 border border-green-100">
