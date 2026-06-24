@@ -681,6 +681,7 @@ Valid field names and types:
 Rules:
 - Advance currentStage only when the assistant has explicitly completed that stage's goal.
 - Apply identifier requirements, exceptions, and routing exactly as written in the ACTIVE PROMPT.
+- kbOnlyMode MUST only be set to true for: login issues, setup/pairing/commissioning failures, app crash or hang, or explicit how-to/action requests. Device hardware issues (offline, not rotating, dead, no recording, no IR, colour issues, etc.) require identifier collection and commissioning check — NEVER set kbOnlyMode=true for these.
 - If the ACTIVE PROMPT says the issue does not require an identifier, mark the identifier stage complete and apply any routing or kbOnlyMode instruction stated there.
 - If kbOnlyMode becomes true, set currentStage to "kb_match" first so the assistant can ask one clarifying question using retrieved SOP candidates.
 - If kbOnlyMode is already true and currentStage is "kb_match", move to "diagnose_troubleshoot" only after the agent answers the clarifying question.
