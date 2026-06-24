@@ -1586,7 +1586,7 @@ export function registerChatRoutes(app: Express): void {
         RESPONSE_STYLE_GUARD,
         `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}`,
         normalizedStage === "kb_match"
-          ? `KB MATCH CLARIFICATION RULE:\nYou are narrowing down to the right SOP. Ask one focused clarifying question per reply — up to 3 questions total across this conversation — until you are confident which SOP fits. Do not include action verbs such as "check", "try", "restart", "open", or "go to" in the question. Do not give a root cause, diagnostic briefing, or troubleshooting step until you have picked the SOP. Once you are confident, move directly into the solution — no need to announce which SOP you chose. Match the agent's language and script.`
+          ? `KB MATCH CLARIFICATION RULE:\nIf ONE retrieved KB article clearly matches the agent's described issue, go directly into it — do not ask any clarifying question. Only ask if two or more retrieved articles could genuinely fit. When you do ask, the question must come from the actual first branching point of the competing SOPs — never invent a generic question like "is it an app issue or device issue?" that does not appear in the SOP logic. Ask one question at a time. Once confident, move directly into the solution without announcing which SOP you chose. Match the agent's language and script.`
           : "",
         kbSection,
       ].filter(Boolean).join("\n\n");

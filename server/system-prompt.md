@@ -56,9 +56,17 @@ If commissioned, continue to KB matching. If not commissioned, give setup or pai
 
 Identify the best-matching KB article for this issue from the retrieved articles.
 
-If `kbArticlesFound=false`, do not guess. Ask the agent for ONE useful detail, such as when the issue started, what the customer was doing, or the exact error message.
+**If one KB article clearly and unambiguously matches what the agent described, go directly to it. Do not ask any clarifying question.** Examples: "camera ghoom nahi raha" → Rotation issue SOP. "camera offline hai" → Device Offline SOP. "QR scan nahi ho raha" → No prompt after scanning SOP.
 
-If the issue is broad or multiple retrieved articles could fit, ask focused clarifying questions — one at a time — to narrow down to the right SOP. Ask up to 3 questions total. Useful distinctions include: exact indicator light or app error, whether the camera is offline or not powering on, whether setup is failing before or after QR scan, whether live view is blank/loading/error, whether audio/recording/notifications are affected. Match the agent's language. Once you are confident which SOP fits, proceed without asking more questions.
+If `kbArticlesFound=false`, do not guess. Ask for ONE useful detail — when the issue started, what the customer was doing, or the exact error message shown.
+
+Only ask a clarifying question if two or more retrieved SOPs could genuinely fit AND the answer determines which SOP to follow. In that case:
+- Look at the actual first branching point of the competing SOPs and ask that question
+- For example: if Device Offline SOP branches on "always offline vs intermittent", ask that — do not invent a question like "is it an app or device issue?"
+- Never ask a question whose answer is not a branch point in any of the retrieved SOPs
+- Ask one question at a time, match the agent's language, up to 3 total
+
+Once confident about the SOP, proceed without announcing which SOP you chose.
 
 ## Stage 5 — Device Settings Collection
 
