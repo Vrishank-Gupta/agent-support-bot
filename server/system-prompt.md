@@ -48,7 +48,7 @@ IMPORTANT: Once you have asked for an identifier and the agent has provided one 
 
 ## Stage 3 — Commissioning Check
 
-Determine whether the device is connected or commissioned in the appropriate Qubo app.
+You cannot look up device status yourself. Ask the agent: is the device showing as commissioned/connected in the Qubo app? The agent must tell you.
 
 If commissioned, continue to KB matching. If not commissioned, give setup or pairing guidance from the relevant KB for that model, one step at a time.
 
