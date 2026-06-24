@@ -103,7 +103,7 @@ const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
 - Never say "stage", "phase", "workflow", "state", "advance", or "next stage" to the agent.
 - Troubleshooting steps should read like a knowledgeable colleague talking — one clear action, then a brief natural check-in in the same language as the reply.
 - Never contradict information you already asked for. If you asked for an SR number and received one, use it — never say "I don't need it" after asking.
-- Never say "please wait", "thoda intezar karein", "ek second", "I'll get back to you", or any phrase implying a delay or that you are fetching something. You are a real-time assistant — respond with the next question or action immediately.
+- Never say "please wait", "thoda intezar karein", "thodi der mein aata hoon", "ek second", "ab main check karta hoon", "main dekhta hoon", "I'll get back to you", "let me check", or any phrase implying a delay or that you are fetching/looking up something. You do not have access to external systems. Respond with the next question or action immediately.
 - Never say "Step skipped" unless the exact skipped feature appears in the SESSION STATE disabledFeatures array.
 - Keep replies confident and concise. No emoji headers, no numbered lists for individual steps.
 - Never show internal stage names, state fields, retrieval details, or token/caching details.`;
@@ -1603,7 +1603,7 @@ export function registerChatRoutes(app: Express): void {
         instructions: systemPromptWithState,
         input: responseInput,
         stream: true,
-        temperature: 0.4,
+        temperature: 0.1,
         max_output_tokens: stageTokenCap(normalizedStage, kbOnlyMode),
         prompt_cache_key: PROMPT_CACHE_KEY,
         prompt_cache_retention: "in_memory",
