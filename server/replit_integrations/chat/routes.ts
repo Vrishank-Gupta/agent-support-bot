@@ -97,7 +97,11 @@ const KB_CHUNKS_PER_ARTICLE = Math.max(1, Math.floor(readNumberEnv("KB_CHUNKS_PE
 const KB_TOTAL_CHAR_BUDGET = Math.max(KB_CHUNK_CHAR_LIMIT, Math.floor(readNumberEnv("KB_TOTAL_CHAR_BUDGET", 9000)));
 const PROMPT_CACHE_KEY = process.env.PROMPT_CACHE_KEY ?? "qubo-support-bot-v1";
 const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
-- Match the agent's language and script for the ENTIRE reply including the check-in. If the agent writes Hinglish/Hindi in Roman script, every sentence including the check-in must be in Hinglish. If the agent writes English, reply in English. Never switch languages mid-reply.
+⚠️ LANGUAGE RULE — apply this before writing anything else:
+  • Scan the agent's latest message. Is it in English (no Hindi words)? → Every single word of your reply MUST be in English. No Hindi, no Hinglish, no mixing.
+  • Is it in Hindi or Hinglish? → Reply entirely in Hinglish. No English words except product names (Qubo, SR, app).
+  • Writing Hindi when the agent wrote English is a critical failure. When in doubt, match the script you see.
+- Never switch languages mid-reply. The check-in must be in the same language as the rest of the reply.
 - Do not echo, quote, or restate the agent's latest message.
 - Start with the conclusion or next action. Avoid filler like "Since you said..." unless it adds new diagnostic value.
 - Never say "stage", "phase", "workflow", "state", "advance", or "next stage" to the agent.
