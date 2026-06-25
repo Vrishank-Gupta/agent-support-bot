@@ -96,6 +96,12 @@ const KB_CHUNK_CHAR_LIMIT = Math.max(1200, Math.floor(readNumberEnv("KB_CHUNK_CH
 const KB_CHUNKS_PER_ARTICLE = Math.max(1, Math.floor(readNumberEnv("KB_CHUNKS_PER_ARTICLE", 2)));
 const KB_TOTAL_CHAR_BUDGET = Math.max(KB_CHUNK_CHAR_LIMIT, Math.floor(readNumberEnv("KB_TOTAL_CHAR_BUDGET", 9000)));
 const PROMPT_CACHE_KEY = process.env.PROMPT_CACHE_KEY ?? "qubo-support-bot-v1";
+
+function detectLanguage(text: string): "english" | "hinglish" {
+  if (/[ऀ-ॿ]/.test(text)) return "hinglish"; // Devanagari script
+  const hinglishWords = /\b(hai|nahi|ho|raha|rahi|kya|aap|mujhe|karo|karna|kar|se|mein|ke|ki|ka|par|bhi|hua|hain|gaya|gayi|toh|achha|theek|haan|shukriya|bata|sakte|sakti|dena|ghoom|offline|setup|karna|nahi)\b/i;
+  return hinglishWords.test(text) ? "hinglish" : "english";
+}
 const RESPONSE_STYLE_GUARD = `RESPONSE STYLE CONTRACT
 ⚠️ LANGUAGE RULE — apply this before writing anything else:
   • Scan the agent's latest message. Is it in English (no Hindi words)? → Every single word of your reply MUST be in English. No Hindi, no Hinglish, no mixing.
@@ -1583,9 +1589,15 @@ export function registerChatRoutes(app: Express): void {
         ].join("\n");
       }
 
+      const agentLanguage = detectLanguage(content ?? "");
+      const languageDirective = agentLanguage === "english"
+        ? "THIS REPLY MUST BE 100% IN ENGLISH. The agent wrote in English. Do not use any Hindi or Hinglish words — not even a single word. No 'hai', 'kya', 'acha', 'shukriya'. Pure English only."
+        : "Reply in natural Hinglish (Hindi written in Roman script). Do not switch to English.";
+
       // Stage-gated state serialization — only sends fields relevant to current stage (~30% token saving)
       const systemPromptWithState = [
         basePrompt,
+        `⚡ LANGUAGE DIRECTIVE (non-negotiable): ${languageDirective}`,
         RESPONSE_STYLE_GUARD,
         `CURRENT SESSION STATE:\n${serializeSessionState(sessionState as Partial<FullSessionState>)}`,
         normalizedStage === "kb_match"
