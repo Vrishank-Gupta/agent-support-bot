@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User, SlidersHorizontal, Database } from "lucide-react";
+import { Plus, MessageSquare, Trash2, Settings, Bot, BookOpen, ShieldCheck, LogOut, User, SlidersHorizontal, Database, Ticket } from "lucide-react";
 import { useConversations, useCreateConversation, useDeleteConversation } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
@@ -43,6 +43,16 @@ export function Sidebar({ isWidgetMode, onToggleWidget }: { isWidgetMode: boolea
           >
             <BookOpen className="w-4 h-4" />
             Knowledge Base
+          </Button>
+        </Link>
+
+        <Link href="/ticket-draft">
+          <Button
+            variant="ghost"
+            className={`w-full justify-start gap-2 ${location === "/ticket-draft" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            <Ticket className="w-4 h-4" />
+            Email Draft
           </Button>
         </Link>
 

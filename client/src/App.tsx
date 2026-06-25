@@ -9,6 +9,7 @@ import { KBManager } from "@/pages/KBManager";
 import { AdminPanel } from "@/pages/AdminPanel";
 import { BotSettings } from "@/pages/BotSettings";
 import { KBSettings } from "@/pages/KBSettings";
+import { TicketDraft } from "@/pages/TicketDraft";
 import { UserProvider } from "@/lib/userContext";
 import { EmailGate } from "@/components/EmailGate";
 
@@ -22,6 +23,7 @@ function Router() {
         <Route path="/admin" component={AdminPanel} />
         <Route path="/bot-settings" component={BotSettings} />
         <Route path="/kb-settings" component={KBSettings} />
+        <Route path="/ticket-draft" component={TicketDraft} />
         <Route component={NotFound} />
       </Switch>
     </EmailGate>

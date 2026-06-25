@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { registerChatRoutes } from "./replit_integrations/chat";
 import { chatStorage } from "./replit_integrations/chat/storage";
+import { registerZohoRoutes } from "./replit_integrations/zoho/routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -9,6 +10,7 @@ export async function registerRoutes(
 ): Promise<Server> {
   // Call the integration chat routes (handles /api/conversations CRUD and messages with SSE)
   registerChatRoutes(app);
+  registerZohoRoutes(app);
 
   // Auto-seed database if empty (run eagerly so the app looks populated immediately)
   (async () => {
