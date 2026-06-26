@@ -1,27 +1,20 @@
 # Support Bot Helper
 
-## Production VM Access
+## Production Deployment
 
-Primary EC2 host:
+Production runs on AWS EC2 via Docker Compose.
 
-```powershell
-ssh -i "C:\Users\Vrishank Gupta\.ssh\analytics-report-key.pem" `
-  -L 3306:127.0.0.1:3306 -N -f `
-  -o StrictHostKeyChecking=no `
-  -o ServerAliveInterval=30 `
-  -o ServerAliveCountMax=10 `
-  ec2-user@ec2-15-207-57-132.ap-south-1.compute.amazonaws.com
+```bash
+# Deploy
+scp -i <key.pem> <changed-files> ec2-user@<EC2_HOST>:<remote-path>
+ssh -i <key.pem> ec2-user@<EC2_HOST> \
+  'cd ~/support-bot-helper && docker compose -f docker-compose.production.yml up -d --build'
+
+# Reset DB prompt after system-prompt.md changes
+curl -X POST http://<EC2_HOST>:5002/api/settings/reset \
+  -H "x-user-email: <admin-email>"
 ```
 
-Interactive shell:
+The app container listens on port `5000`; the production compose maps it to host port `5002`.
 
-```powershell
-ssh -i "C:\Users\Vrishank Gupta\.ssh\analytics-report-key.pem" `
-  -o StrictHostKeyChecking=no `
-  ec2-user@ec2-15-207-57-132.ap-south-1.compute.amazonaws.com
-```
-
-Production deployment uses Docker Compose with `docker-compose.production.yml`.
-The app container listens on port `5000`; the production compose file maps it to host port `5002`.
-
-Keep production secrets in `.env.production` on the VM. Do not commit local `.env` files.
+Keep production secrets in `.env.production` on the VM. Do not commit `.env` files.
